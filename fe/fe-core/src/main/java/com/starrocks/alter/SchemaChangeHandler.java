@@ -606,6 +606,9 @@ public class SchemaChangeHandler extends AlterHandler {
                     t.isDatetime())) {
                 throw new DdlException("Sort key column[" + colName + "] type not supported: " + t);
             }
+            if (oneCol.get().isAllowNull()) {
+                throw new DdlException("Sort key column[" + colName + "] can not be Nullable");
+            }
         }
     }
 
