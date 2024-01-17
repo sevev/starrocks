@@ -299,6 +299,9 @@ void TabletMeta::init_from_pb(TabletMetaPB* ptablet_meta_pb) {
     // init _rs_metas
     for (auto& it : tablet_meta_pb.rs_metas()) {
         auto rs_meta = std::make_shared<RowsetMeta>(it);
+        if (!rs_meta->tablet_schema()) {
+            rs_meta->set_tablet_schema(_schema);
+        }
         if (rs_meta->has_delete_predicate()) {
             add_delete_predicate(rs_meta->delete_predicate(), rs_meta->version().first);
         }
@@ -306,6 +309,9 @@ void TabletMeta::init_from_pb(TabletMetaPB* ptablet_meta_pb) {
     }
     for (auto& it : tablet_meta_pb.inc_rs_metas()) {
         auto rs_meta = std::make_shared<RowsetMeta>(it);
+        if (!rs_meta->tablet_schema()) {
+            rs_meta->set_tablet_schema(_schema);
+        }
         _inc_rs_metas.push_back(std::move(rs_meta));
     }
 
