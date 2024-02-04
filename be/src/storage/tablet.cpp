@@ -1148,6 +1148,9 @@ void Tablet::pick_all_candicate_rowsets(vector<RowsetSharedPtr>* candidate_rowse
     for (auto& it : _rs_version_map) {
         candidate_rowsets->emplace_back(it.second);
     }
+    // TODO(zhangqiang)
+    // get the candidate rowsets for pk
+    // `get_latest_applied_rowsets()`
 }
 
 // For http compaction action

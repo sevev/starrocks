@@ -102,6 +102,8 @@ void CompactionManager::_schedule() {
                 update_tablet_async(compaction_candidate.tablet);
             }
         }
+        // TODO(zhangqiang)
+        // pick pk candidate tablet to create task
     }
 }
 
