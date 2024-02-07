@@ -356,6 +356,14 @@ public class SchemaChangeJobV2 extends AlterJobV2 {
                         long shadowTabletId = shadowTablet.getId();
                         List<Replica> shadowReplicas = ((LocalTablet) shadowTablet).getImmutableReplicas();
                         for (Replica shadowReplica : shadowReplicas) {
+                            // A healthy tablet may have some unhealthy replicas
+                            // e.g.
+                            // A tablet with four replicas, one of them is decommission, another are healthy
+                            // This tablet is healthy actually and the replica in DECOMMISSION state will be dropped later
+                            // Skip these abnormal replica.
+                            if (shadowReplica.isAbnormal()) {
+                                continue;
+                            }
                             long backendId = shadowReplica.getBackendId();
                             countDownLatch.addMark(backendId, shadowTabletId);
                             CreateReplicaTask createReplicaTask = new CreateReplicaTask(

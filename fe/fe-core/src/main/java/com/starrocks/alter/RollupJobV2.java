@@ -263,10 +263,18 @@ public class RollupJobV2 extends AlterJobV2 implements GsonPostProcessable {
                     long rollupTabletId = rollupTablet.getId();
                     List<Replica> rollupReplicas = ((LocalTablet) rollupTablet).getImmutableReplicas();
                     for (Replica rollupReplica : rollupReplicas) {
+                        // A healthy tablet may have some unhealthy replicas
+                        // e.g.
+                        // A tablet with four replicas, one of them is decommission, another are healthy
+                        // This tablet is healthy actually and the replica in DECOMMISSION state will be dropped later
+                        // Skip these abnormal replica.
+                        if (rollupReplica.isAbnormal()) {
+                            continue;
+                        }
                         long backendId = rollupReplica.getBackendId();
                         Preconditions.checkNotNull(tabletIdMap.get(rollupTabletId)); // baseTabletId
                         countDownLatch.addMark(backendId, rollupTabletId);
-                        // create replica with version 1.
+                        // create replica with version 1
                         // version will be updated by following load process, or when rollup task finished.
                         CreateReplicaTask createReplicaTask = new CreateReplicaTask(
                                 backendId, dbId, tableId, partitionId, rollupIndexId, rollupTabletId,

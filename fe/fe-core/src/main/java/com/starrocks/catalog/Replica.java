@@ -339,6 +339,13 @@ public class Replica implements Writable {
         return true;
     }
 
+    public boolean isAbnormal() {
+        if (state == ReplicaState.CLONE || state == ReplicaState.DECOMMISSION || bad) {
+            return true;
+        }
+        return false;
+    }
+
     public boolean setMaxRowsetCreationTime(long newCreationTime) {
         if (newCreationTime < maxRowsetCreationTime) {
             return false;
