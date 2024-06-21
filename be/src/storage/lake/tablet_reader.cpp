@@ -375,6 +375,7 @@ Status TabletReader::init_delete_predicates(const TabletReaderParams& params, De
 }
 
 Status TabletReader::init_collector(const TabletReaderParams& params) {
+    LOG(INFO) << "init collector";
     std::vector<ChunkIteratorPtr> seg_iters;
     RETURN_IF_ERROR(get_segment_iterators(params, &seg_iters));
 

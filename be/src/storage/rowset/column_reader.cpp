@@ -776,10 +776,14 @@ StatusOr<std::unique_ptr<ColumnIterator>> ColumnReader::new_iterator(ColumnAcces
             ASSIGN_OR_RETURN(null_iter, (*_sub_readers)[num_fields]->new_iterator());
         }
 
+        if (path == nullptr) {
+            LOG(INFO) << "no column access path";
+        }
         std::vector<ColumnAccessPath*> child_paths(num_fields, nullptr);
         if (path != nullptr && !path->children().empty()) {
             for (const auto& child : path->children()) {
                 child_paths[child->index()] = child.get();
+                LOG(INFO) << "path:" << child->path();
             }
         }
 
