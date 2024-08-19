@@ -411,11 +411,6 @@ Status OlapChunkSource::_init_olap_reader(RuntimeState* runtime_state) {
 
     auto scope = IOProfiler::scope(IOProfiler::TAG_QUERY, _scan_range->tablet_id);
 
-    // schema_id that not greater than 0 is invalid
-    if (_scan_node->thrift_olap_scan_node().__isset.schema_id && _scan_node->thrift_olap_scan_node().schema_id > 0) {
-        _tablet_schema = GlobalTabletSchemaMap::Instance()->get(_scan_node->thrift_olap_scan_node().schema_id);
-    }
-
     if (_tablet_schema == nullptr) {
         // if column_desc come from fe, reset tablet schema
         if (_scan_node->thrift_olap_scan_node().__isset.columns_desc &&
