@@ -1840,6 +1840,11 @@ public class StmtExecutor {
         boolean isSchedulerExplain = parsedStmt.isExplain()
                 && StatementBase.ExplainLevel.SCHEDULER.equals(parsedStmt.getExplainLevel());
 
+        if (Config.failed_create_plan) {
+            LOG.warn("DML exec failed because test failed.");
+            throw new RuntimeException("DML exec failed because test failed");
+        }
+
         if (isExplainAnalyze) {
             context.getSessionVariable().setEnableProfile(true);
             context.getSessionVariable().setEnableAsyncProfile(false);
