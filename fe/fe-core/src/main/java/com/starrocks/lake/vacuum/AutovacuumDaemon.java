@@ -240,12 +240,13 @@ public class AutovacuumDaemon extends FrontendDaemon {
 
         partition.setLastVacuumTime(startTime);
         if (!hasError && vacuumedVersion > partition.getLastSuccVacuumVersion()) {
-            partition.setLastSuccVacuumVersion(minRetainVersion);
+            partition.setLastSuccVacuumVersion(vacuumedVersion);
         }
         LOG.info("Vacuumed {}.{}.{} hasError={} vacuumedFiles={} vacuumedFileSize={} " +
-                        "visibleVersion={} minRetainVersion={} minActiveTxnId={} cost={}ms",
+                        "visibleVersion={} minRetainVersion={} minActiveTxnId={} cost={}ms vacuumVersion={}",
                 db.getFullName(), table.getName(), partition.getId(), hasError, vacuumedFiles, vacuumedFileSize,
-                visibleVersion, minRetainVersion, minActiveTxnId, System.currentTimeMillis() - startTime);
+                visibleVersion, minRetainVersion, minActiveTxnId, System.currentTimeMillis() - startTime,
+                vacuumedVersion);
     }
 
     private static long computeMinActiveTxnId(Database db, Table table) {
