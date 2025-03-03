@@ -688,6 +688,13 @@ TEST_F(LakeTabletManagerTest, collect_tablet_storage_size) {
         rowset_meta_pb2->set_id(5);
         rowset_meta_pb2->set_data_size(2048);
 
+        FileMetaPB del_file_meta;
+        del_file_meta.set_size(512);
+        auto delvec_meta = metadata.mutable_delvec_meta();
+        (*delvec_meta->mutable_version_to_file())[1] = del_file_meta;
+        auto orphan_file = metadata.add_orphan_files();
+        orphan_file->set_size(1024);
+
         for (int i = 2; i < 4; i++) {
             auto rowset_meta_pb = metadata.add_compaction_inputs();
             rowset_meta_pb->set_id(i);
@@ -700,9 +707,15 @@ TEST_F(LakeTabletManagerTest, collect_tablet_storage_size) {
         auto res = _tablet_manager->get_tablet_metadata(12345, 3);
         EXPECT_TRUE(res.ok());
         auto metadata = std::make_shared<TabletMetadataPB>(*res.value());
+        metadata->mutable_orphan_files()->Clear();
+        metadata->mutable_compaction_inputs()->Clear();
         metadata->set_version(4);
         metadata->set_prev_garbage_version(3);
-        metadata->mutable_compaction_inputs()->Clear();
+        auto orphan_file = metadata->add_orphan_files();
+        orphan_file->set_size(1024);
+        auto sstable = metadata->mutable_sstable_meta()->add_sstables();
+        sstable->set_filesize(512);
+
         auto rowset_meta_pb = metadata->add_rowsets();
         rowset_meta_pb->set_id(6);
         rowset_meta_pb->set_data_size(2048);
@@ -710,19 +723,19 @@ TEST_F(LakeTabletManagerTest, collect_tablet_storage_size) {
     }
     auto res1 = _tablet_manager->collect_tablet_storage_size(12345, 4, 2);
     ASSERT_TRUE(res1.ok());
-    ASSERT_EQ(res1.value(), 7168);
+    ASSERT_EQ(res1.value(), 10240);
 
     auto res2 = _tablet_manager->collect_tablet_storage_size(12345, 4, 3);
     ASSERT_TRUE(res2.ok());
-    ASSERT_EQ(res2.value(), 5120);
+    ASSERT_EQ(res2.value(), 7168);
 
     auto res3 = _tablet_manager->collect_tablet_storage_size(12345, 4, 4);
     ASSERT_TRUE(res3.ok());
-    ASSERT_EQ(res3.value(), 5120);
+    ASSERT_EQ(res3.value(), 6144);
 
     auto res4 = _tablet_manager->collect_tablet_storage_size(12345, 3, 3);
     ASSERT_TRUE(res4.ok());
-    ASSERT_EQ(res4.value(), 3072);
+    ASSERT_EQ(res4.value(), 3584);
 }
 
 #ifdef USE_STAROS
