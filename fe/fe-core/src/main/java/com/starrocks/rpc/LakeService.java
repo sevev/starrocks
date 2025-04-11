@@ -21,6 +21,7 @@ import com.starrocks.proto.AbortCompactionResponse;
 import com.starrocks.proto.AbortTxnRequest;
 import com.starrocks.proto.AbortTxnResponse;
 import com.starrocks.proto.AggregateCompactRequest;
+import com.starrocks.proto.AggregatePublishVersionRequest;
 import com.starrocks.proto.CompactRequest;
 import com.starrocks.proto.CompactResponse;
 import com.starrocks.proto.DeleteDataRequest;
@@ -120,5 +121,8 @@ public interface LakeService {
 
     @ProtobufRPC(serviceName = "LakeService", methodName = "vacuum", onceTalkTimeout = TIMEOUT_VACUUM)
     Future<VacuumResponse> vacuum(VacuumRequest request);
+
+    @ProtobufRPC(serviceName = "LakeService", methodName = "aggregate_publish_version", onceTalkTimeout = TIMEOUT_PUBLISH_VERSION)
+    Future<PublishVersionResponse> aggregatePublishVersion(AggregatePublishVersionRequest request);
 }
 

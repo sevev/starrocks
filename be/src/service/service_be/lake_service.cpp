@@ -176,6 +176,7 @@ void LakeServiceImpl::publish_version(::google::protobuf::RpcController* control
         LOG(INFO) << "get rebuild tablet: " << id;
         rebuild_pindex_tablets.insert(id);
     }
+    bool skip_write_tablet_metadata = request->has_enable_aggregate_publish() && request->enable_aggregate_publish();
     for (auto tablet_id : request->tablet_ids()) {
         auto task = std::make_shared<AutoCleanRunnable>(
                 [&, tablet_id] {
@@ -221,7 +222,8 @@ void LakeServiceImpl::publish_version(::google::protobuf::RpcController* control
 
                     StatusOr<TabletMetadataPtr> res;
                     if (std::chrono::system_clock::now() < timeout_deadline) {
-                        res = lake::publish_version(_tablet_mgr, tablet_id, base_version, new_version, txns);
+                        res = lake::publish_version(_tablet_mgr, tablet_id, base_version, new_version, txns,
+                                                    skip_write_tablet_metadata);
                     } else {
                         auto t = MilliSecondsSinceEpochFromTimePoint(timeout_deadline);
                         res = Status::TimedOut(fmt::format("reached deadline={}/timeout={}", t, timeout_ms));
@@ -405,7 +407,6 @@ void LakeServiceImpl::aggregate_publish_version(::google::protobuf::RpcControlle
                     ? ctx.publish_status
                     : ExecEnv::GetInstance()->lake_tablet_manager()->put_aggregate_tablet_metadata(ctx.tablet_metas);
     final_status.to_protobuf(response->mutable_status());
-    LOG(INFO) << "aggregate publish status: " << final_status;
 }
 
 void LakeServiceImpl::_submit_publish_log_version_task(const int64_t* tablet_ids, size_t tablet_size,

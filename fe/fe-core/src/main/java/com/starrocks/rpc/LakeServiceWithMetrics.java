@@ -19,6 +19,7 @@ import com.starrocks.proto.AbortCompactionResponse;
 import com.starrocks.proto.AbortTxnRequest;
 import com.starrocks.proto.AbortTxnResponse;
 import com.starrocks.proto.AggregateCompactRequest;
+import com.starrocks.proto.AggregatePublishVersionRequest;
 import com.starrocks.proto.CompactRequest;
 import com.starrocks.proto.CompactResponse;
 import com.starrocks.proto.DeleteDataRequest;
@@ -161,5 +162,11 @@ public class LakeServiceWithMetrics implements LakeService {
     public Future<VacuumResponse> vacuum(VacuumRequest request) {
         increaseMetrics();
         return lakeService.vacuum(request);
+    }
+
+    @Override
+    public Future<PublishVersionResponse> aggregatePublishVersion(AggregatePublishVersionRequest request) {
+        increaseMetrics();
+        return lakeService.aggregatePublishVersion(request);
     }
 }

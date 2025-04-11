@@ -156,6 +156,7 @@ public class LakeRollupJob extends LakeTableSchemaChangeJobBase {
             LakeTable table = getTableOrThrow(db, tableId);
             Preconditions.checkState(table.getState() == OlapTable.OlapTableState.ROLLUP);
 
+            enableTabletCreationOptimization |= table.enablePartitionAggregation();
             if (enableTabletCreationOptimization) {
                 numTablets = physicalPartitionIdToRollupIndex.size();
             } else {
