@@ -1020,13 +1020,14 @@ void LakeServiceImpl::aggregate_compact(::google::protobuf::RpcController* contr
     AggregateCompactContext ac_context;
     ac_context.latch = std::make_unique<BThreadCountDownLatch>(request->requests_size());
 
+    DCHECK(request->compute_nodes_size() == request->requests_size());
     for (int i = 0; i < request->requests_size(); i++) {
         const auto& single_req = request->requests(i);
         const auto& compute_node = request->compute_nodes(i);
         if (!compute_node.has_host() || !compute_node.has_brpc_port()) {
             ac_context.handle_failure("compute node missing host/port");
             ac_context.count_down();
-            break;
+            continue;
         }
         brpc::Controller* node_cntl = new brpc::Controller();
         CompactResponse* node_resp = new CompactResponse();
@@ -1036,7 +1037,7 @@ void LakeServiceImpl::aggregate_compact(::google::protobuf::RpcController* contr
         if (str2endpoint(brpc_url.c_str(), &endpoint)) {
             ac_context.handle_failure("unknown endpoint, host=" + compute_node.host());
             ac_context.count_down();
-            break;
+            continue;
         }
         std::unique_ptr<brpc::Channel> channel(new brpc::Channel());
         brpc::ChannelOptions options;
@@ -1045,7 +1046,7 @@ void LakeServiceImpl::aggregate_compact(::google::protobuf::RpcController* contr
         // TODO stub cache
         auto stub = std::make_shared<starrocks::LakeService_Stub>(channel.release(),
                                                                   google::protobuf::Service::STUB_OWNS_CHANNEL);
-        stub->compact(cntl, &single_req, node_resp,
+        stub->compact(node_cntl, &single_req, node_resp,
                       brpc::NewCallback(aggregate_compact_cb, node_cntl, node_resp, &ac_context));
     }
 

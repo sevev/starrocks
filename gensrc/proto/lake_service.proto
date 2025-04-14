@@ -51,13 +51,14 @@ message PublishVersionResponse {
     map<int64, TabletMetadataPB> tablet_metas = 5;
 }
 
-message ComputeNode {
+message ComputeNodePB {
     optional string host = 1;
     optional int32 brpc_port = 2;
+    optional int64 id = 3;
 }
 
 message AggregatePublishVersionRequest {
-    repeated ComputeNode compute_nodes = 1;
+    repeated ComputeNodePB compute_nodes = 1;
     repeated PublishVersionRequest publish_reqs = 2;
 }
 
@@ -107,7 +108,7 @@ message CompactRequest {
 }
 
 message AggregateCompactRequest {
-    repeated ComputeNode compute_nodes = 1;
+    repeated ComputeNodePB compute_nodes = 1;
     repeated CompactRequest requests = 2;
 }
 

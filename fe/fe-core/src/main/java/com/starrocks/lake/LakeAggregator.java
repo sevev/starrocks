@@ -16,13 +16,14 @@ package com.starrocks.lake;
 
 import com.starrocks.common.StarRocksException;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.system.ComputeNode;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 public class LakeAggregator {
     private static final Logger LOG = LogManager.getLogger(Utils.class);
 
-    private LakeAggregator() {}
+    public LakeAggregator() {}
 
     // TODO(zhangqiang)
     // Optimize the aggregator selection strategy
@@ -33,5 +34,14 @@ public class LakeAggregator {
         } catch (StarRocksException e) {
             return null;
         }
+    }
+
+    public ComputeNode chooseAggregatorNode() {
+        Long nodeId = chooseAggregator();
+        if (nodeId == null) {
+            return null;
+        }
+        return GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo()
+                .getBackendOrComputeNode(nodeId);
     }
 }

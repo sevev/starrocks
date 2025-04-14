@@ -786,15 +786,9 @@ public class TableProperty implements Writable, GsonPostProcessable {
         return this;
     }
 
-<<<<<<< HEAD
-    public TableProperty buildAggregateTabletMeta() {
-        if (properties.containsKey(PropertyAnalyzer.PROPERTIES_ENABLE_PARTITION_AGGREGATION)) {
-            aggregateTabletMeta = Boolean.parseBoolean(
-=======
     public TableProperty buildEnablePartitionAggregation() {
         if (properties.containsKey(PropertyAnalyzer.PROPERTIES_ENABLE_PARTITION_AGGREGATION)) {
             enablePartitionAggregation = Boolean.parseBoolean(
->>>>>>> d199c7b8c6 (add enable_partition_aggregation into table property)
                     properties.getOrDefault(PropertyAnalyzer.PROPERTIES_ENABLE_PARTITION_AGGREGATION, "false"));
         }
         return this;
