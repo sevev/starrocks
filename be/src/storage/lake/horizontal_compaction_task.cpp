@@ -122,6 +122,7 @@ Status HorizontalCompactionTask::execute(CancelFunc cancel_func, ThreadPool* flu
     if (_context->no_write_txnlog) {
         // return txn_log to caller later
         _context->txn_log = txn_log;
+        VLOG(2) << "Horizontal compaction skip write txnlog. tablet: " << _tablet.id() << ", txn_id: " << _txn_id;
     } else {
         RETURN_IF_ERROR(_tablet.tablet_manager()->put_txn_log(txn_log));
     }

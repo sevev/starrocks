@@ -978,6 +978,7 @@ struct AggregateCompactContext {
 
     void write_combined_txn_log() {
         if (final_status.ok()) {
+            VLOG(2) << "Write combined txn log. pb=" << combined_txn_log.ShortDebugString();
             final_status = starrocks::write_combined_txn_log(combined_txn_log);
         }
     }

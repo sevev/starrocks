@@ -92,6 +92,7 @@ Status VerticalCompactionTask::execute(CancelFunc cancel_func, ThreadPool* flush
     if (_context->no_write_txnlog) {
         // return txn_log to caller later
         _context->txn_log = txn_log;
+        VLOG(2) << "Vertical compaction skip write txnlog. tablet: " << _tablet.id() << ", txn_id: " << _txn_id;
     } else {
         RETURN_IF_ERROR(_tablet.tablet_manager()->put_txn_log(txn_log));
     }
