@@ -27,7 +27,7 @@ public class LakeAggregator {
 
     // TODO(zhangqiang)
     // Optimize the aggregator selection strategy
-    public static Long chooseAggregator() {
+    private static Long chooseAggregator() {
         try {
             return GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo()
                     .getNodeSelector().seqChooseBackendOrComputeId();
@@ -36,7 +36,7 @@ public class LakeAggregator {
         }
     }
 
-    public ComputeNode chooseAggregatorNode() {
+    public static ComputeNode chooseAggregatorNode() {
         Long nodeId = chooseAggregator();
         if (nodeId == null) {
             return null;

@@ -30,6 +30,7 @@ import com.starrocks.common.FeConstants;
 import com.starrocks.common.util.FrontendDaemon;
 import com.starrocks.common.util.concurrent.lock.LockType;
 import com.starrocks.common.util.concurrent.lock.Locker;
+import com.starrocks.lake.LakeAggregator;
 import com.starrocks.lake.LakeTablet;
 import com.starrocks.proto.TabletInfoPB;
 import com.starrocks.proto.VacuumRequest;
@@ -162,6 +163,7 @@ public class AutovacuumDaemon extends FrontendDaemon {
         long minRetainVersion;
         long startTime = System.currentTimeMillis();
         long minActiveTxnId = computeMinActiveTxnId(db, table);
+        // if enable partition aggregation, there will be only one node.
         Map<ComputeNode, List<TabletInfoPB>> nodeToTablets = new HashMap<>();
 
         Locker locker = new Locker();
@@ -181,17 +183,26 @@ public class AutovacuumDaemon extends FrontendDaemon {
 
         WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
         Warehouse warehouse = warehouseManager.getBackgroundWarehouse();
+        ComputeNode pickNode = null;
         for (Tablet tablet : tablets) {
             LakeTablet lakeTablet = (LakeTablet) tablet;
-            ComputeNode node = warehouseManager.getComputeNodeAssignedToTablet(warehouse.getId(), lakeTablet);
 
-            if (node == null) {
+            if (table.enablePartitionAggregation()) {
+                // if enable partition aggregation, there will be only one node.
+                if (pickNode == null) {
+                    pickNode = LakeAggregator.chooseAggregatorNode();
+                }
+            } else {
+                pickNode = warehouseManager.getComputeNodeAssignedToTablet(warehouse.getId(), lakeTablet);
+            }
+
+            if (pickNode == null) {
                 return;
             }
             TabletInfoPB tabletInfo = new TabletInfoPB();
             tabletInfo.setTabletId(tablet.getId());
             tabletInfo.setMinVersion(lakeTablet.getMinVersion());
-            nodeToTablets.computeIfAbsent(node, k -> Lists.newArrayList()).add(tabletInfo);
+            nodeToTablets.computeIfAbsent(pickNode, k -> Lists.newArrayList()).add(tabletInfo);
         }
 
         boolean hasError = false;
@@ -214,6 +225,7 @@ public class AutovacuumDaemon extends FrontendDaemon {
             vacuumRequest.minActiveTxnId = minActiveTxnId;
             vacuumRequest.partitionId = partition.getId();
             vacuumRequest.deleteTxnLog = needDeleteTxnLog;
+            vacuumRequest.enablePartitionAggregation = table.enablePartitionAggregation();
             // Perform deletion of txn log on the first node only.
             needDeleteTxnLog = false;
             try {

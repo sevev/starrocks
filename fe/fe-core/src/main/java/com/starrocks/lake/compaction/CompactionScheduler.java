@@ -411,8 +411,7 @@ public class CompactionScheduler extends Daemon {
         }
 
         // 2. pick aggregator node and build lake serivce
-        LakeAggregator aggregator = new LakeAggregator();
-        ComputeNode aggregatorNode = aggregator.chooseAggregatorNode();
+        ComputeNode aggregatorNode = LakeAggregator.chooseAggregatorNode();
         LakeService service = BrpcProxy.getLakeService(aggregatorNode.getHost(), aggregatorNode.getBrpcPort());
 
         // 3. build AggregateCompactionTask

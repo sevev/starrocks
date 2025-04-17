@@ -226,8 +226,7 @@ public class Utils {
             }
         }
         // choose one aggregator
-        Long nodeId = LakeAggregator.chooseAggregator();
-        ComputeNode aggregator = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackendOrComputeNode(nodeId);
+        ComputeNode aggregator = LakeAggregator.chooseAggregatorNode();
         AggregatePublishVersionRequest request = new AggregatePublishVersionRequest();
         List<ComputeNodePB> computeNodes = new ArrayList<>();
         List<PublishVersionRequest> publishReqs = new ArrayList<>();
