@@ -575,7 +575,7 @@ void vacuum_full(TabletManager* tablet_mgr, const VacuumFullRequest& request, Va
 
 // TODO: remote list objects requests
 Status delete_tablets_impl(TabletManager* tablet_mgr, const std::string& root_dir,
-                           const std::vector<int64_t>& tablet_ids) {
+                           const std::vector<int64_t>& tablet_ids, bool enable_partition_aggregation) {
     DCHECK(tablet_mgr != nullptr);
     DCHECK(std::is_sorted(tablet_ids.begin(), tablet_ids.end()));
 
@@ -590,6 +590,7 @@ Status delete_tablets_impl(TabletManager* tablet_mgr, const std::string& root_di
     auto log_dir = join_path(root_dir, kTxnLogDirectoryName);
 
     std::set<std::string> txn_logs;
+    std::set<std::string> combine_txn_logs;
     RETURN_IF_ERROR(ignore_not_found(fs->iterate_dir(log_dir, [&](std::string_view name) {
         if (is_txn_log(name)) {
             auto [tablet_id, txn_id] = parse_txn_log_filename(name);
@@ -606,6 +607,10 @@ Status delete_tablets_impl(TabletManager* tablet_mgr, const std::string& root_di
             if (!std::binary_search(tablet_ids.begin(), tablet_ids.end(), tablet_id)) {
                 return true;
             }
+        } else if (is_combined_txn_log(name)) {
+            // should be deleted
+            combine_txn_logs.emplace(name);
+            return true;
         } else {
             return true;
         }
@@ -617,6 +622,34 @@ Status delete_tablets_impl(TabletManager* tablet_mgr, const std::string& root_di
     })));
 
     AsyncFileDeleter deleter(config::lake_vacuum_min_batch_delete_size);
+    // delete files under txnlog
+    auto log_delete_fn = [&](const TxnLogPB& log) {
+        if (log.has_op_write()) {
+            const auto& op = log.op_write();
+            for (const auto& segment : op.rowset().segments()) {
+                RETURN_IF_ERROR(deleter.delete_file(join_path(data_dir, segment)));
+            }
+            for (const auto& f : op.dels()) {
+                RETURN_IF_ERROR(deleter.delete_file(join_path(data_dir, f)));
+            }
+        }
+        if (log.has_op_compaction()) {
+            const auto& op = log.op_compaction();
+            for (const auto& segment : op.output_rowset().segments()) {
+                RETURN_IF_ERROR(deleter.delete_file(join_path(data_dir, segment)));
+            }
+        }
+        if (log.has_op_schema_change()) {
+            const auto& op = log.op_schema_change();
+            for (const auto& rowset : op.rowsets()) {
+                for (const auto& segment : rowset.segments()) {
+                    RETURN_IF_ERROR(deleter.delete_file(join_path(data_dir, segment)));
+                }
+            }
+        }
+        return Status::OK();
+    };
+
     for (const auto& log_name : txn_logs) {
         auto res = tablet_mgr->get_txn_log(join_path(log_dir, log_name), false);
         if (res.status().is_not_found()) {
@@ -624,30 +657,27 @@ Status delete_tablets_impl(TabletManager* tablet_mgr, const std::string& root_di
         } else if (!res.ok()) {
             return res.status();
         } else {
-            auto log = std::move(res).value();
-            if (log->has_op_write()) {
-                const auto& op = log->op_write();
-                for (const auto& segment : op.rowset().segments()) {
-                    RETURN_IF_ERROR(deleter.delete_file(join_path(data_dir, segment)));
-                }
-                for (const auto& f : op.dels()) {
-                    RETURN_IF_ERROR(deleter.delete_file(join_path(data_dir, f)));
-                }
+            auto log_ptr = std::move(res).value();
+            // delete files under txnlog
+            RETURN_IF_ERROR(log_delete_fn(*log_ptr));
+            // delete txnlog
+            RETURN_IF_ERROR(deleter.delete_file(join_path(log_dir, log_name)));
+        }
+    }
+
+    for (const auto& log_name : combine_txn_logs) {
+        auto res = tablet_mgr->get_combined_txn_log(join_path(log_dir, log_name), false);
+        if (res.status().is_not_found()) {
+            continue;
+        } else if (!res.ok()) {
+            return res.status();
+        } else {
+            auto combine_log_ptr = std::move(res).value();
+            // delete files under txnlog
+            for (const auto& log : combine_log_ptr->txn_logs()) {
+                RETURN_IF_ERROR(log_delete_fn(log));
             }
-            if (log->has_op_compaction()) {
-                const auto& op = log->op_compaction();
-                for (const auto& segment : op.output_rowset().segments()) {
-                    RETURN_IF_ERROR(deleter.delete_file(join_path(data_dir, segment)));
-                }
-            }
-            if (log->has_op_schema_change()) {
-                const auto& op = log->op_schema_change();
-                for (const auto& rowset : op.rowsets()) {
-                    for (const auto& segment : rowset.segments()) {
-                        RETURN_IF_ERROR(deleter.delete_file(join_path(data_dir, segment)));
-                    }
-                }
-            }
+            // delete txnlog
             RETURN_IF_ERROR(deleter.delete_file(join_path(log_dir, log_name)));
         }
     }
@@ -657,11 +687,18 @@ Status delete_tablets_impl(TabletManager* tablet_mgr, const std::string& root_di
             return true;
         }
         auto [tablet_id, version] = parse_tablet_metadata_filename(name);
-        if (!std::binary_search(tablet_ids.begin(), tablet_ids.end(), tablet_id)) {
-            return true;
+        if (enable_partition_aggregation) {
+            DCHECK(tablet_id == 0);
+            for (const auto& id : tablet_ids) {
+                tablet_versions[id].insert(version);
+            }
+        } else {
+            if (!std::binary_search(tablet_ids.begin(), tablet_ids.end(), tablet_id)) {
+                return true;
+            }
+            auto [_, inserted] = tablet_versions[tablet_id].insert(version);
+            LOG_IF(FATAL, !inserted) << kDuplicateFilesError << " duplicate file: " << join_path(meta_dir, name);
         }
-        auto [_, inserted] = tablet_versions[tablet_id].insert(version);
-        LOG_IF(FATAL, !inserted) << kDuplicateFilesError << " duplicate file: " << join_path(meta_dir, name);
         return true;
     })));
 
@@ -712,8 +749,18 @@ Status delete_tablets_impl(TabletManager* tablet_mgr, const std::string& root_di
             }
         }
 
-        for (auto version : versions) {
-            auto path = join_path(meta_dir, tablet_metadata_filename(tablet_id, version));
+        if (!enable_partition_aggregation) {
+            for (auto version : versions) {
+                auto path = join_path(meta_dir, tablet_metadata_filename(tablet_id, version));
+                RETURN_IF_ERROR(deleter.delete_file(std::move(path)));
+            }
+        }
+    }
+
+    if (enable_partition_aggregation) {
+        // Aggregation tablet meta deletion
+        for (int64_t version : tablet_versions[*tablet_ids.begin()]) {
+            auto path = join_path(meta_dir, tablet_metadata_filename(0, version));
             RETURN_IF_ERROR(deleter.delete_file(std::move(path)));
         }
     }
@@ -728,7 +775,7 @@ void delete_tablets(TabletManager* tablet_mgr, const DeleteTabletRequest& reques
     std::vector<int64_t> tablet_ids(request.tablet_ids().begin(), request.tablet_ids().end());
     std::sort(tablet_ids.begin(), tablet_ids.end());
     auto root_dir = tablet_mgr->tablet_root_location(tablet_ids[0]);
-    auto st = delete_tablets_impl(tablet_mgr, root_dir, tablet_ids);
+    auto st = delete_tablets_impl(tablet_mgr, root_dir, tablet_ids, request.enable_partition_aggregation());
     st.to_protobuf(response->mutable_status());
 }
 

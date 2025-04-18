@@ -34,6 +34,7 @@ import com.starrocks.common.util.FrontendDaemon;
 import com.starrocks.common.util.NetUtils;
 import com.starrocks.common.util.concurrent.lock.LockType;
 import com.starrocks.common.util.concurrent.lock.Locker;
+import com.starrocks.lake.LakeAggregator;
 import com.starrocks.proto.DeleteTabletRequest;
 import com.starrocks.proto.DeleteTabletResponse;
 import com.starrocks.rpc.BrpcProxy;
@@ -95,18 +96,26 @@ public class StarMgrMetaSyncer extends FrontendDaemon {
         return groupIds;
     }
 
-    public static void dropTabletAndDeleteShard(List<Long> shardIds, StarOSAgent starOSAgent) {
+    public static void dropTabletAndDeleteShard(List<Long> shardIds, StarOSAgent starOSAgent,
+            boolean enablePartitionAggregation) {
         Preconditions.checkNotNull(starOSAgent);
         Map<Long, Set<Long>> shardIdsByBeMap = new HashMap<>();
         // group shards by be
+        long pickBackendId = 0;
         for (long shardId : shardIds) {
             try {
-                WarehouseManager manager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-                Warehouse warehouse = manager.getBackgroundWarehouse();
-                long workerGroupId = manager.selectWorkerGroupByWarehouseId(warehouse.getId())
-                        .orElse(StarOSAgent.DEFAULT_WORKER_GROUP_ID);
-                long backendId = starOSAgent.getPrimaryComputeNodeIdByShard(shardId, workerGroupId);
-                shardIdsByBeMap.computeIfAbsent(backendId, k -> Sets.newHashSet()).add(shardId);
+                if (enablePartitionAggregation) {
+                    if (pickBackendId == 0) {
+                        pickBackendId = LakeAggregator.chooseAggregator();
+                    }
+                } else {
+                    WarehouseManager manager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
+                    Warehouse warehouse = manager.getBackgroundWarehouse();
+                    long workerGroupId = manager.selectWorkerGroupByWarehouseId(warehouse.getId())
+                            .orElse(StarOSAgent.DEFAULT_WORKER_GROUP_ID);
+                    pickBackendId = starOSAgent.getPrimaryComputeNodeIdByShard(shardId, workerGroupId);
+                }
+                shardIdsByBeMap.computeIfAbsent(pickBackendId, k -> Sets.newHashSet()).add(shardId);
             } catch (StarRocksException ignored1) {
                 // ignore error
             }
@@ -124,6 +133,7 @@ public class StarMgrMetaSyncer extends FrontendDaemon {
             }
             DeleteTabletRequest request = new DeleteTabletRequest();
             request.tabletIds = Lists.newArrayList(shards);
+            request.enablePartitionAggregation = enablePartitionAggregation;
 
             try {
                 LakeService lakeService = BrpcProxy.getLakeService(node.getHost(), node.getBrpcPort());
@@ -234,7 +244,7 @@ public class StarMgrMetaSyncer extends FrontendDaemon {
             } else {
                 // drop meta and data
                 long start = System.currentTimeMillis();
-                dropTabletAndDeleteShard(shardIds, starOSAgent);
+                dropTabletAndDeleteShard(shardIds, starOSAgent, false);
                 LOG.debug("delete shards from starMgr and FE, shard group: {}, cost: {} ms",
                         groupId, (System.currentTimeMillis() - start));
             }
@@ -406,7 +416,7 @@ public class StarMgrMetaSyncer extends FrontendDaemon {
                 try {
                     List<Long> shardIds = new ArrayList<>();
                     shardIds.addAll(entry.getValue());
-                    dropTabletAndDeleteShard(shardIds, starOSAgent);
+                    dropTabletAndDeleteShard(shardIds, starOSAgent, table.enablePartitionAggregation());
                 } catch (Exception e) {
                     // ignore exception
                     LOG.info(e.getMessage());

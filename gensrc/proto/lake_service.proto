@@ -79,6 +79,7 @@ message AbortTxnResponse {
 message DeleteTabletRequest {
     // All tablets must be in the same partition.
     repeated int64 tablet_ids = 1;
+    optional bool enable_partition_aggregation = 2;
 }
 
 message DeleteTabletResponse {
