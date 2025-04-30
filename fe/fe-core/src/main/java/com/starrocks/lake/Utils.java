@@ -258,7 +258,8 @@ public class Utils {
 
         try {
             PublishVersionResponse response = future.get();
-            if (response != null && response.failedTablets != null && !response.failedTablets.isEmpty()) {
+            if (response != null && ((response.failedTablets != null && !response.failedTablets.isEmpty()) || 
+                    (response.status != null && response.status.statusCode != 0))) {
                 throw new RpcException("Fail to publish version for tablets " + response.failedTablets + ": " +
                         response.status.errorMsgs.get(0));
             }

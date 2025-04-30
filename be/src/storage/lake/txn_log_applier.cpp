@@ -92,7 +92,7 @@ Status apply_alter_meta_log(TabletMetadataPB* metadata, const TxnLogPB_OpAlterMe
 class PrimaryKeyTxnLogApplier : public TxnLogApplier {
 public:
     PrimaryKeyTxnLogApplier(const Tablet& tablet, MutableTabletMetadataPtr metadata, int64_t new_version,
-                            bool rebuild_pindex)
+                            bool rebuild_pindex, bool skip_write_tablet_metadata)
             : _tablet(tablet),
               _metadata(std::move(metadata)),
               _base_version(_metadata->version()),
@@ -100,6 +100,7 @@ public:
               _builder(_tablet, _metadata),
               _rebuild_pindex(rebuild_pindex) {
         _metadata->set_version(_new_version);
+        _skip_write_tablet_metadata = skip_write_tablet_metadata;
     }
 
     ~PrimaryKeyTxnLogApplier() override { handle_failure(); }
@@ -195,7 +196,7 @@ public:
             _tablet.update_mgr()->index_cache().update_object_size(_index_entry, _index_entry->value().memory_usage());
         }
         _metadata->GetReflection()->MutableUnknownFields(_metadata.get())->Clear();
-        RETURN_IF_ERROR(_builder.finalize(_max_txn_id));
+        RETURN_IF_ERROR(_builder.finalize(_max_txn_id, _skip_write_tablet_metadata));
         _has_finalized = true;
         return Status::OK();
     }
@@ -400,10 +401,9 @@ class NonPrimaryKeyTxnLogApplier : public TxnLogApplier {
 public:
     NonPrimaryKeyTxnLogApplier(const Tablet& tablet, MutableTabletMetadataPtr metadata, int64_t new_version,
                                bool skip_write_tablet_metadata)
-            : _tablet(tablet),
-              _metadata(std::move(metadata)),
-              _new_version(new_version),
-              _skip_write_tablet_metadata(skip_write_tablet_metadata) {}
+            : _tablet(tablet), _metadata(std::move(metadata)), _new_version(new_version) {
+        _skip_write_tablet_metadata = skip_write_tablet_metadata;
+    }
 
     Status apply(const TxnLogPB& log) override {
         if (log.has_op_write()) {
@@ -657,16 +657,14 @@ private:
     Tablet _tablet;
     MutableTabletMetadataPtr _metadata;
     int64_t _new_version;
-    bool _skip_write_tablet_metadata;
 };
 
 std::unique_ptr<TxnLogApplier> new_txn_log_applier(const Tablet& tablet, MutableTabletMetadataPtr metadata,
                                                    int64_t new_version, bool rebuild_pindex,
                                                    bool skip_write_tablet_metadata) {
     if (metadata->schema().keys_type() == PRIMARY_KEYS) {
-        // TODO(zhangqiang)
-        // pk does not support aggregate publish yet, `_skip_write_tablet_metadata` is not work right now
-        return std::make_unique<PrimaryKeyTxnLogApplier>(tablet, std::move(metadata), new_version, rebuild_pindex);
+        return std::make_unique<PrimaryKeyTxnLogApplier>(tablet, std::move(metadata), new_version, rebuild_pindex,
+                                                         skip_write_tablet_metadata);
     }
     return std::make_unique<NonPrimaryKeyTxnLogApplier>(tablet, std::move(metadata), new_version,
                                                         skip_write_tablet_metadata);

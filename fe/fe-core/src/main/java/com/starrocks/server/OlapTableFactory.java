@@ -448,10 +448,6 @@ public class OlapTableFactory implements AbstractTableFactory {
             
             try {
                 boolean enablePartitionAggregation = PropertyAnalyzer.analyzeEnablePartitionAggregation(properties);
-                // Not support primary key yet
-                if (table.getKeysType() == KeysType.PRIMARY_KEYS) {
-                    enablePartitionAggregation = false;
-                }
                 table.setEnablePartitionAggregation(enablePartitionAggregation);
             } catch (Exception e) {
                 throw new DdlException(e.getMessage());
