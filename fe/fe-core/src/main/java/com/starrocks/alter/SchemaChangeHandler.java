@@ -1866,6 +1866,7 @@ public class SchemaChangeHandler extends AlterHandler {
             throw new DdlException("olapTable is null");
         }
         boolean fastSchemaEvolution = olapTable.getUseFastSchemaEvolution();
+        LOG.info("table {} fastSchemaEvolution: {}", olapTable.getName(), fastSchemaEvolution);
         //for multi add colmuns clauses
         IntSupplier colUniqueIdSupplier = new IntSupplier() {
             private int pendingMaxColUniqueId = olapTable.getMaxColUniqueId();
@@ -2004,6 +2005,7 @@ public class SchemaChangeHandler extends AlterHandler {
             return null;
         }
 
+        LOG.info("table {} fastSchemaEvolution: {}", olapTable.getName(), fastSchemaEvolution);
         if (!fastSchemaEvolution) {
             return createJob(schemaChangeData);
         } else if (RunMode.isSharedNothingMode()) {

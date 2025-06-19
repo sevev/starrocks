@@ -287,60 +287,97 @@ Status TabletManager::put_aggregate_tablet_metadata(std::map<int64_t, TabletMeta
         return Status::InternalError("tablet_metas cannot be empty");
     }
 
-    SharedTabletMetadataPB shared_meta;
-    auto partition_location = tablet_metadata_root_location(tablet_metas.begin()->first);
-    std::unordered_map<int64_t, TabletSchemaPB> unique_schemas;
-    for (auto& [tablet_id, meta] : tablet_metas) {
-        (*shared_meta.mutable_tablet_to_schema())[tablet_id] = meta.schema().id();
-        unique_schemas.emplace(meta.schema().id(), meta.schema());
-        for (const auto& [schema_id, schema] : meta.historical_schemas()) {
-            unique_schemas.emplace(schema_id, schema);
+    std::map<std::string, std::set<int64_t>> partition_location_to_tablets;
+    for (auto& [tablet_id, _] : tablet_metas) {
+        auto real_location = _location_provider->real_location(tablet_metadata_root_location(tablet_id));
+        if (!real_location.ok()) {
+            std::string msg = strings::Substitute("tablet:$0 get real location failed, $1", tablet_id,
+                                                  real_location.status().to_string());
+            LOG(WARNING) << msg;
+            return Status::InternalError(msg);
+        }
+        LOG(INFO) << "tablet: " << tablet_id << " root_location: " << tablet_metadata_root_location(tablet_id)
+                  << " real_location: " << *real_location;
+        auto iter = partition_location_to_tablets.find(*real_location);
+        if (iter == partition_location_to_tablets.end()) {
+            partition_location_to_tablets[*real_location] = {tablet_id};
+        } else {
+            iter->second.insert(tablet_id);
+        }
+    }
+    for (auto& [loca, tablets] : partition_location_to_tablets) {
+        LOG(INFO) << "partition location: " << loca;
+        for (auto& id : tablets) {
+            LOG(INFO) << "tablet id: " << id;
         }
     }
 
-    for (auto& [schema_id, schema] : unique_schemas) {
-        (*shared_meta.mutable_schemas())[schema_id] = std::move(schema);
-    }
+    for (auto& [_, tablets] : partition_location_to_tablets) {
+        SharedTabletMetadataPB shared_meta;
+        auto partition_location = tablet_metadata_root_location(*tablets.begin());
 
-    auto make_page_pointer = [](int64_t offset, int64_t size) {
-        PagePointerPB pointer;
-        pointer.set_offset(offset);
-        pointer.set_size(size);
-        return pointer;
-    };
+        std::unordered_map<int64_t, TabletSchemaPB> unique_schemas;
+        int64_t current_tablet_id = 0;
+        int64_t commit_version = 0;
+        for (auto& tablet_id : tablets) {
+            auto iter = tablet_metas.find(tablet_id);
+            RETURN_ERROR_IF_FALSE((iter != tablet_metas.end()),
+                                  strings::Substitute("tablet {} metadata not found", tablet_id));
+            const auto& meta = iter->second;
+            current_tablet_id = meta.id();
+            RETURN_ERROR_IF_FALSE((commit_version == 0 || commit_version == meta.version()),
+                                  strings::Substitute("commit version not match: $0 vs $1", version, meta.version()));
+            commit_version = meta.version();
+            (*shared_meta.mutable_tablet_to_schema())[tablet_id] = meta.schema().id();
+            unique_schemas.emplace(meta.schema().id(), meta.schema());
+            for (const auto& [schema_id, schema] : meta.historical_schemas()) {
+                unique_schemas.emplace(schema_id, schema);
+            }
+        }
 
-    const std::string meta_location =
-            aggregate_tablet_metadata_location(tablet_metas.begin()->first, tablet_metas.begin()->second.version());
+        for (auto& [schema_id, schema] : unique_schemas) {
+            (*shared_meta.mutable_schemas())[schema_id] = std::move(schema);
+        }
 
-    ASSIGN_OR_RETURN(auto fs, FileSystem::CreateSharedFromString(meta_location));
-    WritableFileOptions opts{.sync_on_close = true, .mode = FileSystem::CREATE_OR_OPEN_WITH_TRUNCATE};
-    ASSIGN_OR_RETURN(auto meta_file, fs->new_writable_file(opts, meta_location));
-    std::string serialized_buf;
-    int64_t current_offset = 0;
-    for (auto& [tablet_id, meta] : tablet_metas) {
-        meta.clear_schema();
-        meta.mutable_historical_schemas()->clear();
+        auto make_page_pointer = [](int64_t offset, int64_t size) {
+            PagePointerPB pointer;
+            pointer.set_offset(offset);
+            pointer.set_size(size);
+            return pointer;
+        };
+
+        const std::string meta_location = aggregate_tablet_metadata_location(current_tablet_id, commit_version);
+        ASSIGN_OR_RETURN(auto fs, FileSystem::CreateSharedFromString(meta_location));
+        WritableFileOptions opts{.sync_on_close = true, .mode = FileSystem::CREATE_OR_OPEN_WITH_TRUNCATE};
+        ASSIGN_OR_RETURN(auto meta_file, fs->new_writable_file(opts, meta_location));
+        std::string serialized_buf;
+        int64_t current_offset = 0;
+        for (auto& tablet_id : tablets) {
+            auto iter = tablet_metas.find(tablet_id);
+            iter->second.clear_schema();
+            iter->second.mutable_historical_schemas()->clear();
+            serialized_buf.clear();
+            if (!iter->second.SerializeToString(&serialized_buf)) {
+                return Status::InternalError("Failed to serialize tablet metadata");
+            }
+
+            (*shared_meta.mutable_tablet_meta_pages())[tablet_id] =
+                    make_page_pointer(current_offset, serialized_buf.size());
+            RETURN_IF_ERROR(meta_file->append(Slice(serialized_buf)));
+            current_offset += serialized_buf.size();
+        }
+
         serialized_buf.clear();
-        if (!meta.SerializeToString(&serialized_buf)) {
-            return Status::InternalError("Failed to serialize tablet metadata");
+        if (!shared_meta.SerializeToString(&serialized_buf)) {
+            return Status::IOError("Failed to write shared metadata header");
         }
-
-        (*shared_meta.mutable_tablet_meta_pages())[tablet_id] =
-                make_page_pointer(current_offset, serialized_buf.size());
         RETURN_IF_ERROR(meta_file->append(Slice(serialized_buf)));
-        current_offset += serialized_buf.size();
+        std::string fixed_buf;
+        put_fixed64_le(&fixed_buf, serialized_buf.size());
+        RETURN_IF_ERROR(meta_file->append(Slice(fixed_buf)));
+        RETURN_IF_ERROR(meta_file->close());
+        //_metacache->cache_aggregation_partition(_location_provider->real_location(partition_location), true);
     }
-
-    serialized_buf.clear();
-    if (!shared_meta.SerializeToString(&serialized_buf)) {
-        return Status::IOError("Failed to write shared metadata header");
-    }
-    RETURN_IF_ERROR(meta_file->append(Slice(serialized_buf)));
-    std::string fixed_buf;
-    put_fixed64_le(&fixed_buf, serialized_buf.size());
-    RETURN_IF_ERROR(meta_file->append(Slice(fixed_buf)));
-    RETURN_IF_ERROR(meta_file->close());
-    _metacache->cache_aggregation_partition(partition_location, true);
     return Status::OK();
 }
 

@@ -96,6 +96,9 @@ public class LakeTableRollupBuilder extends AlterJobV2Builder {
                 List<Long> originTableIds = originTablets.stream()
                         .map(tablet -> tablet.getId())
                         .collect(Collectors.toList());
+                LOG.info("table: {} physicalPartitionId: {}", olapTable.getName(), physicalPartitionId);
+                LOG.info("table: {} partitionFilePathInfo: {}", olapTable.getName(), 
+                                olapTable.getPartitionFilePathInfo(partitionId).getFullPath());
                 List<Long> shadowTabletIds = GlobalStateMgr.getCurrentState().getStarOSAgent().createShards(
                         originTablets.size(),
                         olapTable.getPartitionFilePathInfo(partitionId),

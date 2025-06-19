@@ -367,7 +367,9 @@ public class LakeTableSchemaChangeJob extends LakeTableSchemaChangeJobBase {
             OlapTable table = getTableOrThrow(db, tableId);
             Preconditions.checkState(table.getState() == OlapTable.OlapTableState.SCHEMA_CHANGE);
 
-            enableTabletCreationOptimization |= table.isFileBundling();
+            if (table.isFileBundling()) {
+                enableTabletCreationOptimization = false;
+            }
             if (enableTabletCreationOptimization) {
                 numTablets = physicalPartitionIndexMap.size();
             } else {
@@ -392,6 +394,9 @@ public class LakeTableSchemaChangeJob extends LakeTableSchemaChangeJobBase {
 
                     short shadowShortKeyColumnCount = indexShortKeyMap.get(shadowIdxId);
                     List<Column> shadowSchema = indexSchemaMap.get(shadowIdxId);
+                    for (Column column : shadowSchema) {
+                        LOG.info("shadowIdxId: {} column: {}", shadowIdxId, column.getName());
+                    }
                     long originIndexId = indexIdMap.get(shadowIdxId);
                     KeysType originKeysType = table.getKeysTypeByIndexId(originIndexId);
                     TTabletSchema tabletSchema = SchemaInfo.newBuilder()
@@ -803,6 +808,7 @@ public class LakeTableSchemaChangeJob extends LakeTableSchemaChangeJobBase {
             txnInfo.commitTime = finishedTimeMs / 1000;
             txnInfo.gtid = watershedGtid;
             List<Tablet> tablets = new ArrayList<>();
+            LOG.info("isFileBundling: {}", isFileBundling);
             for (long partitionId : physicalPartitionIndexMap.rowKeySet()) {
                 long commitVersion = commitVersionMap.get(partitionId);
                 tablets.clear();
