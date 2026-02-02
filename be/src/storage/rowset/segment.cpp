@@ -481,7 +481,26 @@ StatusOr<std::unique_ptr<ColumnIterator>> Segment::new_column_iterator_or_defaul
     auto id = column.unique_id();
     if (_column_readers.contains(id)) {
         ASSIGN_OR_RETURN(auto source_iter, _column_readers[id]->new_iterator(path, &column));
-        if (_column_readers[id]->column_type() == column.type()) {
+        bool need_cast = false;
+        if (_column_readers[id]->column_type() != column.type()) {
+            need_cast = true;
+        } else if (column.type() == TYPE_CHAR) {
+            // if the column is a char column, we need to check if the length of the column is the same as
+            // the length of the tablet column.
+            // Because the char column is padded with 0 to the length of the tablet column and the storage
+            // bitmap index and zone map need it.
+            const TabletColumn* tablet_column = nullptr;
+            for (size_t i = 0; i < _tablet_schema->num_columns(); i++) {
+                if (_tablet_schema->column(i).unique_id() == id) {
+                    tablet_column = &_tablet_schema->column(i);
+                    break;
+                }
+            }
+            if (tablet_column != nullptr && tablet_column->length() != column.length()) {
+                need_cast = true;
+            }
+        }
+        if (!need_cast) {
             return source_iter;
         } else {
             auto nullable = _column_readers[id]->is_nullable();
