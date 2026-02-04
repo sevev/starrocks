@@ -353,7 +353,7 @@ select * from test2 where v2 = '1';
 -- !result
 
 -- name: test_alter_table_char_padding @cloud
-CREATE TABLE 3
+CREATE TABLE test3
 (
     k1 BIGINT,
     v1 LARGEINT,
