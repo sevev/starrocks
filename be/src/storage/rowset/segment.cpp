@@ -486,17 +486,13 @@ StatusOr<std::unique_ptr<ColumnIterator>> Segment::new_column_iterator_or_defaul
             need_cast = true;
         } else if (column.type() == TYPE_CHAR) {
             // if the column is a char column, we need to check if the length of the column is the same as
-            // the length of the tablet column.
+            // the length stored in the segment footer (the original length when the segment was written).
             // Because the char column is padded with 0 to the length of the tablet column and the storage
             // bitmap index and zone map need it.
-            const TabletColumn* tablet_column = nullptr;
-            for (size_t i = 0; i < _tablet_schema->num_columns(); i++) {
-                if (_tablet_schema->column(i).unique_id() == id) {
-                    tablet_column = &_tablet_schema->column(i);
-                    break;
-                }
-            }
-            if (tablet_column != nullptr && tablet_column->length() != column.length()) {
+            // In shared-data mode, segments may be opened with a new tablet schema that has a different
+            // CHAR length than what's stored on disk, so we must compare against the segment's stored length.
+            int32_t segment_column_length = _column_readers[id]->column_length();
+            if (segment_column_length != column.length()) {
                 need_cast = true;
             }
         }
