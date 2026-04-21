@@ -21,6 +21,7 @@
 #include "tenann/common/type_traits.h"
 #include "tenann/factory/ann_searcher_factory.h"
 #include "tenann/factory/index_factory.h"
+#include "tenann/index/index_cache.h"
 #include "tenann/searcher/ann_searcher.h"
 #include "tenann/searcher/faiss_hnsw_ann_searcher.h"
 #include "tenann/searcher/id_filter.h"
@@ -33,9 +34,16 @@ public:
     TenANNReader() = default;
     ~TenANNReader() override = default;
 
-    Status init_searcher(const tenann::IndexMeta& meta, const std::string& index_path) override;
-
-    Status init_searcher(const tenann::IndexMeta& meta, const std::string& index_path, FileSystem* fs) override;
+    // Single unified init path. When `fs == nullptr` the index file is read
+    // directly from the local filesystem; otherwise reads go through
+    // VectorIndexFileReader on the provided FileSystem (S3/HDFS/OSS).
+    //
+    // Single-flight on the SR-owned VectorIndexCache (via
+    // tenann::GetGlobalIndexCache()) dedups concurrent cold misses for the
+    // same `index_path`; the loader runs under the vector_index mem tracker
+    // so the cache charge is attributed correctly.
+    Status init_searcher(const tenann::IndexMeta& meta, const std::string& index_path,
+                         FileSystem* fs = nullptr) override;
 
     Status init_searcher(const tenann::IndexMeta& meta, const std::string& index_path, FileSystem* fs,
                          size_t segment_num_rows, int query_k, bool user_set_ef) override;
@@ -48,6 +56,9 @@ public:
 
 private:
     std::shared_ptr<tenann::AnnSearcher> _searcher;
+    // Pin the cached IndexRef for the lifetime of this reader so the entry
+    // cannot be evicted while this searcher is still servicing queries.
+    tenann::IndexCacheHandle _cache_handle;
 };
 
 } // namespace starrocks

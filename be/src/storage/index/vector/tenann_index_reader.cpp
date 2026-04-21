@@ -39,10 +39,16 @@
 #include "common/status.h"
 #include "common/statusor.h"
 #include "fs/fs.h"
+#include "runtime/current_thread.h"
+#include "runtime/exec_env.h"
+#include "runtime/mem_tracker.h"
 #include "storage/index/vector/tenann/tenann_index_utils.h"
 #include "storage/index/vector/vector_index_file_reader.h"
 #include "tenann/common/error.h"
 #include "tenann/common/seq_view.h"
+#include "tenann/factory/index_factory.h"
+#include "tenann/index/index_cache.h"
+#include "tenann/index/index_reader.h"
 #include "tenann/searcher/id_filter.h"
 
 namespace starrocks {
@@ -65,43 +71,62 @@ void apply_index_reader_cache_options(tenann::IndexMeta* meta_copy) {
 
 } // namespace
 
-Status TenANNReader::init_searcher(const tenann::IndexMeta& meta, const std::string& index_path) {
+Status TenANNReader::init_searcher(const tenann::IndexMeta& meta, const std::string& index_path, FileSystem* fs) {
+    auto meta_copy = meta;
+    apply_index_reader_cache_options(&meta_copy);
+
+    auto* cache = tenann::GetGlobalIndexCache();
+    if (cache == nullptr) {
+        return Status::InternalError(
+                "VectorIndexCache not injected. ExecEnv::init must call tenann::SetGlobalIndexCache.");
+    }
+
+    // Pre-populate the cache with single-flight semantics. The loader
+    // deduplicates concurrent cold misses on the same `index_path` and
+    // runs under the vector_index mem tracker so the resident-bytes charge
+    // lands on the right bucket. After GetOrCreate returns, the searcher's
+    // own ReadIndex() call below hits the cache (Lookup -> hit) so the
+    // file is read at most once across all concurrent callers.
+    auto* tracker = GlobalEnv::GetInstance()->vector_index_mem_tracker();
+    std::shared_ptr<VectorIndexFileReader> external_file_reader;
+    if (fs != nullptr) {
+        ASSIGN_OR_RETURN(auto opened, VectorIndexFileReader::open(fs, index_path));
+        external_file_reader = std::shared_ptr<VectorIndexFileReader>(opened.release());
+    }
+
+    auto loader = [&meta_copy, &index_path, &external_file_reader, cache,
+                   tracker]() -> tenann::IndexRef {
+        SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(tracker);
+        auto reader = tenann::IndexFactory::CreateReaderFromMeta(meta_copy);
+        reader->SetIndexCache(cache);
+        if (external_file_reader != nullptr) {
+            reader->SetFileReader(external_file_reader);
+        }
+        return reader->ReadIndexFile(index_path);
+    };
+
     try {
-        auto meta_copy = meta;
-        apply_index_reader_cache_options(&meta_copy);
+        (void)cache->GetOrCreate(tenann::CacheKey(index_path), loader, &_cache_handle);
+    } catch (const tenann::Error& e) {
+        return tenann_error_to_status(e);
+    } catch (const std::exception& e) {
+        return Status::InternalError(e.what());
+    }
 
-        tenann::IndexCache::GetGlobalInstance()->SetCapacity(config::vector_query_cache_capacity);
-
+    try {
+        // Searcher base ctor already injects GetGlobalIndexCache() into its
+        // internal IndexReader, so we don't have to call SetIndexCache again.
         _searcher = tenann::AnnSearcherFactory::CreateSearcherFromMeta(meta_copy);
-        _searcher->index_reader()->SetIndexCache(tenann::IndexCache::GetGlobalInstance());
+        // Cache-hit fast path: tenann's IndexReader::ReadIndex does a Lookup
+        // first; since we just primed the cache above it returns immediately
+        // without touching the file. OnIndexLoaded() still runs so the
+        // searcher's internal state (faiss hnsw ptr, etc.) is set up.
         _searcher->ReadIndex(index_path);
 
         DCHECK(_searcher->is_index_loaded());
-    } catch (tenann::Error& e) {
-        return Status::InternalError(e.what());
-    }
-    return Status::OK();
-}
-
-Status TenANNReader::init_searcher(const tenann::IndexMeta& meta, const std::string& index_path, FileSystem* fs) {
-    if (fs == nullptr) {
-        return init_searcher(meta, index_path);
-    }
-    try {
-        auto meta_copy = meta;
-        apply_index_reader_cache_options(&meta_copy);
-
-        tenann::IndexCache::GetGlobalInstance()->SetCapacity(config::vector_query_cache_capacity);
-
-        _searcher = tenann::AnnSearcherFactory::CreateSearcherFromMeta(meta_copy);
-        _searcher->index_reader()->SetIndexCache(tenann::IndexCache::GetGlobalInstance());
-        ASSIGN_OR_RETURN(auto index_raf, fs->new_random_access_file(index_path));
-        ASSIGN_OR_RETURN(auto file_size, index_raf->get_size());
-        auto file_reader = std::make_shared<VectorIndexFileReader>(std::move(index_raf), file_size);
-        _searcher->ReadIndex(file_reader);
-
-        DCHECK(_searcher->is_index_loaded());
-    } catch (tenann::Error& e) {
+    } catch (const tenann::Error& e) {
+        return tenann_error_to_status(e);
+    } catch (const std::exception& e) {
         return Status::InternalError(e.what());
     }
     return Status::OK();

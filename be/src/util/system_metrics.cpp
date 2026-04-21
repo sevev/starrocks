@@ -37,7 +37,8 @@
 #include <runtime/exec_env.h>
 #include <runtime/mem_tracker.h>
 #ifdef WITH_TENANN
-#include <tenann/index/index_cache.h>
+#include "runtime/exec_env.h"
+#include "storage/index/vector/vector_index_cache.h"
 #endif
 
 #include <cstdio>
@@ -717,7 +718,8 @@ void SystemMetrics::_install_vector_index_cache_metrics(MetricRegistry* registry
 
 void SystemMetrics::_update_vector_index_cache_metrics() {
 #ifdef WITH_TENANN
-    auto* index_cache = tenann::IndexCache::GetGlobalInstance();
+    auto* index_cache =
+            ExecEnv::GetInstance() != nullptr ? ExecEnv::GetInstance()->vector_index_cache() : nullptr;
     if (UNLIKELY(index_cache == nullptr)) {
         return;
     }

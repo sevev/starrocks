@@ -51,20 +51,17 @@ public:
     virtual ~VectorIndexReader() = default;
 
 #ifdef WITH_TENANN
-    virtual Status init_searcher(const tenann::IndexMeta& meta, const std::string& index_path) = 0;
+    // Unified entry point. `fs == nullptr` falls back to the local filesystem
+    // (tenann reads `index_path` directly). When `fs` is non-null the reader
+    // bridges tenann through VectorIndexFileReader so remote filesystems
+    // (S3/HDFS/OSS) work transparently.
+    virtual Status init_searcher(const tenann::IndexMeta& meta, const std::string& index_path,
+                                 FileSystem* fs = nullptr) = 0;
 
-    virtual Status init_searcher(const tenann::IndexMeta& meta, const std::string& index_path, FileSystem* fs) {
-        return init_searcher(meta, index_path);
-    }
-
-    // Overload that carries context for per-segment adaptive ef_search:
-    //   segment_num_rows: row count of this segment, used as the scaling signal
-    //   query_k: effective k (already multiplied by k_factor) the caller plans
-    //     to pass to search(); used as a floor for ef_base to match faiss's
-    //     internal `ef = max(efSearch, k)` rule
-    //   user_set_ef: true if the user explicitly specified efSearch (e.g. via
-    //     query hint); when true, adaptive scaling is skipped
-    // Default forwards to the row-count-unaware overload.
+    // Adaptive-ef overload: caller (segment_iterator) supplies per-segment
+    // context so the reader can apply apply_adaptive_ef_search() before
+    // loading the searcher. Default forwards to the row-count-unaware form
+    // for readers that don't implement adaptive scaling.
     virtual Status init_searcher(const tenann::IndexMeta& meta, const std::string& index_path, FileSystem* fs,
                                  size_t segment_num_rows, int query_k, bool user_set_ef) {
         return init_searcher(meta, index_path, fs);

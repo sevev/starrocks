@@ -23,6 +23,7 @@
 #include "common/config_vector_index_fwd.h"
 #include "storage/index/vector/tenann/tenann_index_utils.h"
 #include "tenann/factory/index_factory.h"
+#include "tenann/index/index_cache.h"
 
 namespace starrocks {
 
@@ -54,7 +55,7 @@ Status TenAnnIndexBuilderProxy::init() {
     try {
         // build and write index
         _index_builder = tenann::IndexFactory::CreateBuilderFromMeta(meta_copy);
-        _index_builder->index_writer()->SetIndexCache(tenann::IndexCache::GetGlobalInstance());
+        _index_builder->index_writer()->SetIndexCache(tenann::GetGlobalIndexCache());
         // Use tenann file writer for remote FS (S3/HDFS) in shared-data mode
         if (_file_writer != nullptr) {
             _index_builder->index_writer()->SetFileWriter(
