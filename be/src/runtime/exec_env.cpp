@@ -104,6 +104,7 @@
 #include "runtime/stream_load/stream_load_executor.h"
 #include "runtime/stream_load/transaction_mgr.h"
 #include "runtime/thrift_rpc_helper.h"
+#include "storage/index/vector/vector_index_cache.h"
 #include "storage/lake/fixed_location_provider.h"
 #include "storage/lake/lake_persistent_index_parallel_compact_mgr.h"
 #include "storage/lake/replication_txn_manager.h"
@@ -114,6 +115,7 @@
 #include "storage/storage_engine.h"
 #include "storage/tablet_schema_map.h"
 #include "storage/update_manager.h"
+#include "tenann/index/index_cache.h"
 #include "types/hll.h"
 #include "udf/python/env.h"
 
@@ -293,6 +295,11 @@ Status GlobalEnv::_init_mem_tracker(MetricRegistry* metrics) {
             regist_tracker(MemTrackerType::CONSISTENCY, consistency_mem_limit, process_mem_tracker());
     _datacache_mem_tracker = regist_tracker(MemTrackerType::DATACACHE, -1, process_mem_tracker());
     _replication_mem_tracker = regist_tracker(MemTrackerType::REPLICATION, -1, process_mem_tracker());
+    // Vector index cache (HNSW whole-index + IVF-PQ per-list blocks).
+    // Sibling of page_cache/datacache under process_mem_tracker; capacity
+    // is controlled by config::vector_index_cache_limit, so no hard limit
+    // at the tracker level.
+    _vector_index_mem_tracker = regist_tracker(MemTrackerType::VECTOR_INDEX, -1, process_mem_tracker());
 
     register_hll_registers_allocator();
     if (metrics != nullptr) {
@@ -847,6 +854,21 @@ Status ExecEnv::init(const std::vector<StorePath>& store_paths, ProcessMetricsRe
     PythonEnvManager::getInstance().start_background_cleanup_thread();
 
     _refresh_service_contexts();
+    // Install the SR-owned VectorIndexCache as tenann's global IndexCache.
+    // Must run after GlobalEnv mem trackers are ready (global_env->init()
+    // runs before exec_env->init() in starrocks_be.cpp); the cache must be
+    // destructed in ExecEnv::destroy() before GlobalEnv::stop() tears down
+    // the tracker hierarchy (spec §7).
+    int64_t vi_capacity = config::vector_index_cache_limit;
+    if (vi_capacity <= 0) {
+        vi_capacity = config::vector_query_cache_capacity;
+        LOG(WARNING) << "vector_index_cache_limit <= 0; falling back to deprecated "
+                     << "vector_query_cache_capacity = " << vi_capacity;
+    }
+    LOG(INFO) << "Vector index cache capacity = " << vi_capacity << " bytes";
+    _vector_index_cache = std::make_unique<VectorIndexCache>(
+            static_cast<size_t>(vi_capacity), GlobalEnv::GetInstance()->vector_index_mem_tracker());
+    tenann::SetGlobalIndexCache(_vector_index_cache.get());
 
     return Status::OK();
 }
@@ -1136,6 +1158,11 @@ void ExecEnv::destroy() {
     _pk_index_execution_thread_pool.reset();
     _pk_index_memtable_flush_thread_pool.reset();
     _lake_partial_update_thread_pool.reset();
+    // Tear down the SR-owned VectorIndexCache before GlobalEnv::stop()
+    // resets the mem tracker hierarchy. The cache's entry deleter
+    // dereferences the tracker, so order here is load-bearing.
+    tenann::SetGlobalIndexCache(nullptr);
+    _vector_index_cache.reset();
     _metrics = nullptr;
 }
 

@@ -91,6 +91,7 @@ template <class T>
 class ClientCache;
 class HeartbeatFlags;
 class DiagnoseDaemon;
+class VectorIndexCache;
 
 namespace pipeline {
 class DriverExecutor;
@@ -149,6 +150,7 @@ public:
     MemTracker* bitmap_index_mem_tracker() { return _bitmap_index_mem_tracker.get(); }
     MemTracker* bloom_filter_index_mem_tracker() { return _bloom_filter_index_mem_tracker.get(); }
     MemTracker* builtin_inverted_index_mem_tracker() { return _builtin_inverted_index_mem_tracker.get(); }
+    MemTracker* vector_index_mem_tracker() { return _vector_index_mem_tracker.get(); }
     MemTracker* segment_zonemap_mem_tracker() { return _segment_zonemap_mem_tracker.get(); }
     MemTracker* short_key_index_mem_tracker() { return _short_key_index_mem_tracker.get(); }
     MemTracker* compaction_mem_tracker() { return _compaction_mem_tracker.get(); }
@@ -214,6 +216,9 @@ private:
     std::shared_ptr<MemTracker> _bitmap_index_mem_tracker;
     std::shared_ptr<MemTracker> _bloom_filter_index_mem_tracker;
     std::shared_ptr<MemTracker> _builtin_inverted_index_mem_tracker;
+
+    // Memory held by the SR-owned VectorIndexCache
+    std::shared_ptr<MemTracker> _vector_index_mem_tracker;
 
     // The memory used for compaction
     std::shared_ptr<MemTracker> _compaction_mem_tracker;
@@ -388,6 +393,10 @@ public:
 
     DiagnoseDaemon* diagnose_daemon() const { return _diagnose_daemon; }
 
+    // SR-owned LRU used by tenann (HNSW whole-index + IVF-PQ per-list blocks).
+    // Installed via tenann::SetGlobalIndexCache() during init().
+    VectorIndexCache* vector_index_cache() { return _vector_index_cache.get(); }
+
 private:
     void _refresh_service_contexts();
     void _wait_for_fragments_finish();
@@ -478,6 +487,12 @@ private:
     AgentServices _agent_services;
     QueryExecutionServices _query_execution_services;
     AdminServices _admin_services;
+
+    // SR-owned LRU behind tenann's IndexCache. Destructed in
+    // ExecEnv::destroy() BEFORE GlobalEnv::stop() tears down the mem
+    // tracker hierarchy; the cache's entry deleter captures the tracker
+    // pointer by value.
+    std::unique_ptr<VectorIndexCache> _vector_index_cache;
 };
 
 template <>

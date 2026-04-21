@@ -1615,6 +1615,10 @@ CONF_mInt32(query_cache_num_lanes_per_driver, "4");
 // Used by vector query cache, 500MB in default
 CONF_Int64(vector_query_cache_capacity, "536870912");
 
+// Vector index cache capacity: HNSW whole-index + IVF-PQ per-list blocks
+// share this LRU. Default 4 GiB.
+CONF_mInt64(vector_index_cache_limit, "4294967296");
+
 // Used to limit buffer size of tablet send channel.
 CONF_mInt64(send_channel_buffer_limit, "67108864");
 
