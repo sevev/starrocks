@@ -62,6 +62,7 @@
 #include "runtime/batch_write/batch_write_mgr.h"
 #include "runtime/batch_write/txn_state_cache.h"
 #include "runtime/exec_env.h"
+#include "storage/index/vector/vector_index_cache.h"
 #include "runtime/load_channel_mgr.h"
 #include "storage/compaction_manager.h"
 #include "storage/lake/compaction_scheduler.h"
@@ -107,6 +108,14 @@ Status UpdateConfigAction::update_config(const std::string& name, const std::str
             ASSIGN_OR_RETURN(int64_t cache_limit, DataCache::GetInstance()->get_datacache_limit());
             cache_limit = DataCache::GetInstance()->check_datacache_limit(cache_limit);
             cache->set_capacity(cache_limit);
+            return Status::OK();
+        });
+        _config_callback.emplace("vector_index_cache_limit", [&]() -> Status {
+            int64_t limit = config::vector_index_cache_limit;
+            auto* exec_env = ExecEnv::GetInstance();
+            if (limit > 0 && exec_env != nullptr && exec_env->vector_index_cache() != nullptr) {
+                exec_env->vector_index_cache()->SetCapacity(static_cast<size_t>(limit));
+            }
             return Status::OK();
         });
 #endif

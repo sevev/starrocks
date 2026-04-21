@@ -633,6 +633,14 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 - 是否动态：是
 - 描述：HNSW 向量索引自适应 `ef_search` 缩放的总开关。开启时，BE 会根据 segment 行数为每个 segment 调整有效 `ef_search`，从而在 compaction 合并大 segment 后无需手动调参即可保持召回率。设置为 `false` 时关闭自适应缩放，按用户指定的 `ef_search` 原值执行。
 - 引入版本：-
+### vector_index_cache_limit
+
+- 默认值：4294967296 (4 GiB)
+- 类型：Long
+- 单位：字节（Bytes）
+- 是否动态：是
+- 描述：SR 端向量索引缓存的总容量，在同一个 LRU 中同时管理 HNSW 整索引条目和 IVF-PQ 每个 list 的 block 条目（当 `enable_vector_index_block_cache=true` 时）。BE 启动时和每次通过 HTTP `/api/update_config` 更新时均生效。当值设为 `0` 或负数时，回退到已废弃的 `vector_query_cache_capacity` 并打印 warning 日志。推荐值：大节点上约占 BE 内存 12%（128 GiB BE 约 16 GiB），64 GiB BE 配 8 GiB，小 BE 2–4 GiB。
+- 引入版本：v4.3.0
 
 ### vector_adaptive_ef_alpha
 
