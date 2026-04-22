@@ -65,6 +65,12 @@ bool VectorIndexCache::GetOrCreate(const tenann::CacheKey& key, const IndexLoade
     // Follow the PrimaryIndex::prepare_primary_index pattern: get_or_create →
     // per-entry guard → load if needed → update_object_size. The guard holds
     // across loader() so concurrent callers on the same key single-flight.
+    //
+    // Return value:
+    //   true  — handle now points to a populated ref (hit or miss-then-loaded).
+    //   false — load failed (loader returned null or threw); handle is unchanged.
+    //           The entry holds no ref and is released, so a later caller on
+    //           the same key will retry loader() from scratch.
     Entry* entry = _cache.get_or_create(key.to_string());
     bool ran = false;
     tenann::IndexRef ref;
@@ -74,15 +80,25 @@ bool VectorIndexCache::GetOrCreate(const tenann::CacheKey& key, const IndexLoade
             tenann::IndexRef loaded;
             try {
                 loaded = loader();
-            } catch (...) {
+            } catch (const std::exception& e) {
                 g.unlock();
-                _cache.release(entry);
-                throw;
+                // DynamicCache::release() decrements ref then DCHECKs when it hits 0,
+                // and a freshly-created entry has ref=1 from get_or_create — that's
+                // the exact path here, so release() would abort debug/ASAN builds.
+                // try_remove_by_key drops the unreferenced entry cleanly without
+                // tripping that assertion. Production (release) builds previously
+                // worked because DCHECK is a no-op there; this avoids the diverging
+                // behavior.
+                _cache.try_remove_by_key(key.to_string());
+                LOG(ERROR) << "VectorIndexCache loader threw for key " << key.to_string() << ": "
+                           << e.what();
+                return false;
             }
             if (loaded == nullptr) {
                 g.unlock();
-                _cache.release(entry);
-                LOG(ERROR) << "VectorIndexCache loader returned null IndexRef for key " << key.to_string();
+                _cache.try_remove_by_key(key.to_string());
+                LOG(ERROR) << "VectorIndexCache loader returned null IndexRef for key "
+                           << key.to_string();
                 return false;
             }
             _loader_run_count.fetch_add(1, std::memory_order_relaxed);
@@ -95,7 +111,7 @@ bool VectorIndexCache::GetOrCreate(const tenann::CacheKey& key, const IndexLoade
     _lookup_count.fetch_add(1, std::memory_order_relaxed);
     if (!ran) _hit_count.fetch_add(1, std::memory_order_relaxed);
     *handle = _wrap(entry, std::move(ref));
-    return !ran;
+    return true;
 }
 
 tenann::IndexCacheHandle VectorIndexCache::_wrap(Entry* entry, tenann::IndexRef ref) {

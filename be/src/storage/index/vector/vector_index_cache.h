@@ -80,6 +80,9 @@ public:
     // tenann::IndexCache — thin adapters around DynamicCache primitives.
     [[nodiscard]] bool Lookup(const tenann::CacheKey& key, tenann::IndexCacheHandle* handle) override;
     void Insert(const tenann::CacheKey& key, tenann::IndexRef ref, tenann::IndexCacheHandle* handle) override;
+    // Returns true on success (hit or miss-then-loaded), false if the loader
+    // failed (returned null or threw). Exceptions from the loader are caught
+    // and logged; callers should check the bool instead of wrapping in try/catch.
     [[nodiscard]] bool GetOrCreate(const tenann::CacheKey& key, const IndexLoader& loader,
                                    tenann::IndexCacheHandle* handle) override;
 

@@ -105,12 +105,12 @@ Status TenANNReader::init_searcher(const tenann::IndexMeta& meta, const std::str
         return reader->ReadIndexFile(index_path);
     };
 
-    try {
-        (void)cache->GetOrCreate(tenann::CacheKey(index_path), loader, &_cache_handle);
-    } catch (const tenann::Error& e) {
-        return tenann_error_to_status(e);
-    } catch (const std::exception& e) {
-        return Status::InternalError(e.what());
+    // GetOrCreate swallows loader exceptions and reports failure via the
+    // returned bool (logging the underlying cause). On failure we surface a
+    // generic InternalError to the caller since the detailed reason is in the
+    // BE log.
+    if (!cache->GetOrCreate(tenann::CacheKey(index_path), loader, &_cache_handle)) {
+        return Status::InternalError("failed to load vector index: " + index_path);
     }
 
     try {
@@ -123,7 +123,12 @@ Status TenANNReader::init_searcher(const tenann::IndexMeta& meta, const std::str
         // searcher's internal state (faiss hnsw ptr, etc.) is set up.
         _searcher->ReadIndex(index_path);
 
-        DCHECK(_searcher->is_index_loaded());
+        // Promote DCHECK to a hard Status check: release builds strip DCHECK,
+        // and a silent AttachIndex failure here would produce wrong search
+        // results downstream rather than a clean error.
+        if (!_searcher->is_index_loaded()) {
+            return Status::InternalError("vector index searcher did not finish loading: " + index_path);
+        }
     } catch (const tenann::Error& e) {
         return tenann_error_to_status(e);
     } catch (const std::exception& e) {
