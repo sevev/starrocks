@@ -638,11 +638,11 @@ This topic introduces the following types of BE configurations:
 - Introduced in: -
 ### vector_index_cache_limit
 
-- Default: 4294967296 (4 GiB)
-- Type: Long
-- Unit: Bytes
+- Default: `20%`
+- Type: String
+- Unit: Bytes, with unit suffix (`K`/`M`/`G`/`T`) or percentage of BE `mem_limit` (`%`)
 - Is mutable: Yes
-- Description: Total capacity of the SR-owned vector index cache, which holds HNSW whole-index entries and IVF-PQ per-list block entries (when `enable_vector_index_block_cache=true`) in a single LRU. Applied at BE startup and on every HTTP `/api/update_config` call. Setting this value to `0` or a negative number falls back to the deprecated `vector_query_cache_capacity` with a warning log. Recommended sizes: 12% of BE memory on large nodes (≈16 GiB on 128 GiB BE), 8 GiB on 64 GiB BE, 2–4 GiB on small BEs.
+- Description: Total capacity of the SR-owned vector index cache, which holds HNSW whole-index entries and IVF-PQ per-list block entries (when `enable_vector_index_block_cache=true`) in a single LRU. Applied at BE startup and on every HTTP `/api/update_config` call. Accepts absolute bytes (e.g. `4294967296`), units (`4G`, `512M`), or a percentage of the BE process memory limit (`20%`). The default `20%` matches `storage_page_cache_limit`'s style and scales automatically with the BE memory budget.
 - Introduced in: v4.3.0
 
 ### vector_adaptive_ef_alpha

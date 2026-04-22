@@ -43,6 +43,7 @@
 
 #include "agent/agent_common.h"
 #include "agent/agent_server.h"
+#include "base/string/parse_util.h"
 #include "cache/datacache.h"
 #include "cache/datacache_utils.h"
 #include "cache/mem_cache/page_cache.h"
@@ -111,11 +112,17 @@ Status UpdateConfigAction::update_config(const std::string& name, const std::str
             return Status::OK();
         });
         _config_callback.emplace("vector_index_cache_limit", [&]() -> Status {
-            int64_t limit = config::vector_index_cache_limit;
             auto* exec_env = ExecEnv::GetInstance();
-            if (limit > 0 && exec_env != nullptr && exec_env->vector_index_cache() != nullptr) {
-                exec_env->vector_index_cache()->SetCapacity(static_cast<size_t>(limit));
+            if (exec_env == nullptr || exec_env->vector_index_cache() == nullptr) {
+                return Status::InternalError("Vector index cache is not initialized");
             }
+            const int64_t proc_mem = GlobalEnv::GetInstance()->process_mem_limit();
+            ASSIGN_OR_RETURN(int64_t limit,
+                             ParseUtil::parse_mem_spec(config::vector_index_cache_limit, proc_mem));
+            if (limit < 0) limit = 0;
+            exec_env->vector_index_cache()->SetCapacity(static_cast<size_t>(limit));
+            LOG(INFO) << "vector_index_cache_limit updated: " << config::vector_index_cache_limit
+                      << " => " << limit << " bytes";
             return Status::OK();
         });
 #endif

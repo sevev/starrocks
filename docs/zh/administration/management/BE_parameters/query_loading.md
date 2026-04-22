@@ -635,11 +635,11 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 - 引入版本：-
 ### vector_index_cache_limit
 
-- 默认值：4294967296 (4 GiB)
-- 类型：Long
-- 单位：字节（Bytes）
+- 默认值：`20%`
+- 类型：String
+- 单位：字节，支持单位后缀（`K`/`M`/`G`/`T`）或 BE `mem_limit` 的百分比（`%`）
 - 是否动态：是
-- 描述：SR 端向量索引缓存的总容量，在同一个 LRU 中同时管理 HNSW 整索引条目和 IVF-PQ 每个 list 的 block 条目（当 `enable_vector_index_block_cache=true` 时）。BE 启动时和每次通过 HTTP `/api/update_config` 更新时均生效。当值设为 `0` 或负数时，回退到已废弃的 `vector_query_cache_capacity` 并打印 warning 日志。推荐值：大节点上约占 BE 内存 12%（128 GiB BE 约 16 GiB），64 GiB BE 配 8 GiB，小 BE 2–4 GiB。
+- 描述：SR 端向量索引缓存的总容量，在同一个 LRU 中同时管理 HNSW 整索引条目和 IVF-PQ 每个 list 的 block 条目（当 `enable_vector_index_block_cache=true` 时）。BE 启动时和每次通过 HTTP `/api/update_config` 更新时均生效。接受绝对字节（如 `4294967296`）、带单位数值（`4G`、`512M`）或相对于 BE 进程内存限额的百分比（如 `20%`）。默认 `20%`，与 `storage_page_cache_limit` 风格一致，随 BE 内存规模自动伸缩。
 - 引入版本：v4.3.0
 
 ### vector_adaptive_ef_alpha

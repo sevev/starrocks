@@ -859,13 +859,17 @@ Status ExecEnv::init(const std::vector<StorePath>& store_paths, ProcessMetricsRe
     // runs before exec_env->init() in starrocks_be.cpp); the cache must be
     // destructed in ExecEnv::destroy() before GlobalEnv::stop() tears down
     // the tracker hierarchy (spec §7).
-    int64_t vi_capacity = config::vector_index_cache_limit;
+    const int64_t proc_mem = GlobalEnv::GetInstance()->process_mem_limit();
+    ASSIGN_OR_RETURN(int64_t vi_capacity,
+                     ParseUtil::parse_mem_spec(config::vector_index_cache_limit, proc_mem));
     if (vi_capacity <= 0) {
-        vi_capacity = config::vector_query_cache_capacity;
-        LOG(WARNING) << "vector_index_cache_limit <= 0; falling back to deprecated "
-                     << "vector_query_cache_capacity = " << vi_capacity;
+        LOG(WARNING) << "vector_index_cache_limit resolved to " << vi_capacity
+                     << " bytes (raw=" << config::vector_index_cache_limit
+                     << ", process_mem_limit=" << proc_mem << "); vector index cache disabled";
+        vi_capacity = 0;
     }
-    LOG(INFO) << "Vector index cache capacity = " << vi_capacity << " bytes";
+    LOG(INFO) << "Vector index cache capacity = " << vi_capacity << " bytes (config="
+              << config::vector_index_cache_limit << ")";
     _vector_index_cache = std::make_unique<VectorIndexCache>(
             static_cast<size_t>(vi_capacity), GlobalEnv::GetInstance()->vector_index_mem_tracker());
     tenann::SetGlobalIndexCache(_vector_index_cache.get());
