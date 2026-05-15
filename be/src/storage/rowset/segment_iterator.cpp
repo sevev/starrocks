@@ -53,6 +53,7 @@
 #include "storage/index/index_descriptor.h"
 #include "storage/index/vector/tenann/del_id_filter.h"
 #include "storage/index/vector/tenann/tenann_index_utils.h"
+#include "storage/index/vector/tenann_index_reader.h"
 #include "storage/index/vector/vector_index_reader.h"
 #include "storage/index/vector/vector_index_reader_factory.h"
 #include "storage/index/vector/vector_search_option.h"
@@ -988,13 +989,34 @@ inline Status SegmentIterator::_init_reader_from_file(const std::string& index_p
             break;
         }
     }
-    auto status = _vector_index_ctx->ann_reader->init_searcher(*_vector_index_ctx->index_meta.get(), index_path, fs,
-                                                               static_cast<size_t>(_segment->num_rows()),
-                                                               _vector_index_ctx->k, user_set_ef);
+    // Try the segment-level weak_ptr fast path first. If the cached IndexRef
+    // is still alive, lock() returns a strong ref and we skip both the outer
+    // VectorIndexCache GetOrCreate and tenann's internal ReadIndex cache
+    // lookup — 2 mutex ops saved per tablet per query.
+    Status status;
+    if (auto* tenann_reader = dynamic_cast<TenANNReader*>(_vector_index_ctx->ann_reader.get())) {
+        if (auto pinned = _segment->try_pin_vector_index()) {
+            status = tenann_reader->init_searcher_with_ref(*_vector_index_ctx->index_meta.get(), std::move(pinned));
+            if (status.ok()) {
+                return Status::OK();
+            }
+            // fall through to full path on any error
+        }
+    }
+    status = _vector_index_ctx->ann_reader->init_searcher(*_vector_index_ctx->index_meta.get(), index_path, fs,
+                                                          static_cast<size_t>(_segment->num_rows()),
+                                                          _vector_index_ctx->k, user_set_ef);
     // empty ann reader — caller will set up brute-force fallback
     if (status.is_not_supported()) {
         _vector_index_ctx->use_vector_index = false;
         return Status::OK();
+    }
+    if (status.ok()) {
+        // Stash the freshly-resolved IndexRef onto the segment so the next
+        // query can take the weak_ptr fast path above.
+        if (auto* tenann_reader = dynamic_cast<TenANNReader*>(_vector_index_ctx->ann_reader.get())) {
+            _segment->remember_vector_index(tenann_reader->index_ref());
+        }
     }
     return status;
 #else

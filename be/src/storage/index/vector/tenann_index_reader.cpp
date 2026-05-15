@@ -35,6 +35,8 @@
 #ifdef WITH_TENANN
 #include "tenann_index_reader.h"
 
+#include <stdexcept>
+
 #include "common/config_vector_index_fwd.h"
 #include "common/status.h"
 #include "common/statusor.h"
@@ -87,16 +89,22 @@ Status TenANNReader::init_searcher(const tenann::IndexMeta& meta, const std::str
     // lands on the right bucket. After GetOrCreate returns, the searcher's
     // own ReadIndex() call below hits the cache (Lookup -> hit) so the
     // file is read at most once across all concurrent callers.
+    // The remote .vi file is opened lazily *inside* the loader so the warm
+    // path (cache hit) pays zero OSS/S3 round-trips: GetOrCreate's internal
+    // Lookup short-circuits before the loader runs.
     auto* tracker = GlobalEnv::GetInstance()->vector_index_mem_tracker();
-    std::shared_ptr<VectorIndexFileReader> external_file_reader;
-    if (fs != nullptr) {
-        ASSIGN_OR_RETURN(auto opened, VectorIndexFileReader::open(fs, index_path));
-        external_file_reader = std::shared_ptr<VectorIndexFileReader>(opened.release());
-    }
 
-    auto loader = [&meta_copy, &index_path, &external_file_reader, cache,
+    auto loader = [&meta_copy, &index_path, fs, cache,
                    tracker]() -> tenann::IndexRef {
         SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(tracker);
+        std::shared_ptr<VectorIndexFileReader> external_file_reader;
+        if (fs != nullptr) {
+            auto opened_or = VectorIndexFileReader::open(fs, index_path);
+            if (!opened_or.ok()) {
+                throw std::runtime_error(opened_or.status().to_string());
+            }
+            external_file_reader = std::shared_ptr<VectorIndexFileReader>(opened_or.value().release());
+        }
         auto reader = tenann::IndexFactory::CreateReaderFromMeta(meta_copy);
         reader->SetIndexCache(cache);
         if (external_file_reader != nullptr) {
@@ -117,11 +125,11 @@ Status TenANNReader::init_searcher(const tenann::IndexMeta& meta, const std::str
         // Searcher base ctor already injects GetGlobalIndexCache() into its
         // internal IndexReader, so we don't have to call SetIndexCache again.
         _searcher = tenann::AnnSearcherFactory::CreateSearcherFromMeta(meta_copy);
-        // Cache-hit fast path: tenann's IndexReader::ReadIndex does a Lookup
-        // first; since we just primed the cache above it returns immediately
-        // without touching the file. OnIndexLoaded() still runs so the
-        // searcher's internal state (faiss hnsw ptr, etc.) is set up.
-        _searcher->ReadIndex(index_path);
+        // Cache-hit fast path: skip the second cache lookup that Searcher::ReadIndex
+        // would otherwise do — we already hold the IndexRef from the outer
+        // GetOrCreate above. AttachIndexRef just wires the ref + runs
+        // OnIndexLoaded() so the searcher's internal faiss pointers are set.
+        _searcher->AttachIndexRef(_cache_handle.index_ref());
 
         // Promote DCHECK to a hard Status check: release builds strip DCHECK,
         // and a silent AttachIndex failure here would produce wrong search
@@ -142,6 +150,26 @@ Status TenANNReader::init_searcher(const tenann::IndexMeta& meta, const std::str
     auto adapted_meta = meta;
     apply_adaptive_ef_search(&adapted_meta, segment_num_rows, query_k, user_set_ef);
     return init_searcher(adapted_meta, index_path, fs);
+}
+
+Status TenANNReader::init_searcher_with_ref(const tenann::IndexMeta& meta, tenann::IndexRef ref) {
+    if (!ref) {
+        return Status::InternalError("init_searcher_with_ref called with null ref");
+    }
+    auto meta_copy = meta;
+    apply_index_reader_cache_options(&meta_copy);
+    try {
+        _searcher = tenann::AnnSearcherFactory::CreateSearcherFromMeta(meta_copy);
+        _searcher->AttachIndexRef(std::move(ref));
+        if (!_searcher->is_index_loaded()) {
+            return Status::InternalError("vector index searcher did not finish loading from ref");
+        }
+    } catch (const tenann::Error& e) {
+        return tenann_error_to_status(e);
+    } catch (const std::exception& e) {
+        return Status::InternalError(e.what());
+    }
+    return Status::OK();
 }
 
 Status TenANNReader::search(tenann::PrimitiveSeqView query_vector, int k, int64_t* result_ids,

@@ -73,6 +73,13 @@ using ChunkIteratorPtr = std::shared_ptr<ChunkIterator>;
 namespace lake {
 class TabletManager;
 }
+}  // namespace starrocks
+
+namespace tenann {
+class Index;
+}  // namespace tenann
+
+namespace starrocks {
 
 // A Segment is used to represent a segment in memory format. When segment is
 // generated, it won't be modified, so this struct aimed to help read operation.
@@ -192,6 +199,15 @@ public:
     const std::string& file_name() const { return _segment_file_info.path; }
 
     const FileInfo& file_info() const { return _segment_file_info; }
+
+    // Per-segment weak_ptr to the cached tenann::Index. First query
+    // populates; subsequent queries on the same segment can bypass the
+    // global VectorIndexCache lookup by locking the weak_ptr. Cache
+    // eviction naturally expires the weak_ptr. Writes are unsynchronized:
+    // a benign race on first-reload costs at most one extra cache lookup;
+    // GetOrCreate dedups to a single IndexRef anyway.
+    std::shared_ptr<tenann::Index> try_pin_vector_index() const { return _vector_index_weak.lock(); }
+    void remember_vector_index(const std::shared_ptr<tenann::Index>& ref) { _vector_index_weak = ref; }
 
     uint32_t num_rows() const { return _num_rows; }
 
@@ -340,6 +356,9 @@ private:
     lake::TabletManager* _tablet_manager = nullptr;
     // used to guarantee that segment will be opened at most once in a thread-safe way
     OnceFlag _open_once;
+
+    // Weak reference to the cached vector index for this segment's .vi file.
+    mutable std::weak_ptr<tenann::Index> _vector_index_weak;
 #ifdef BE_TEST
     static bool _s_allow_batch_update_mode;
 #endif

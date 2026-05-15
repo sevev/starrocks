@@ -48,6 +48,16 @@ public:
     Status init_searcher(const tenann::IndexMeta& meta, const std::string& index_path, FileSystem* fs,
                          size_t segment_num_rows, int query_k, bool user_set_ef) override;
 
+    // Bypass the global VectorIndexCache when the caller already holds a
+    // live IndexRef (typically pinned via a segment-level weak_ptr). Skips
+    // both the outer GetOrCreate and the inner Searcher::ReadIndex cache
+    // lookup, saving ~2 mutex-protected hash lookups per query per tablet.
+    Status init_searcher_with_ref(const tenann::IndexMeta& meta, tenann::IndexRef ref);
+
+    // Exposes the IndexRef so callers (SegmentIterator) can stash it in the
+    // owning Segment's weak_ptr for future reuse.
+    tenann::IndexRef index_ref() const { return _cache_handle.index_ref(); }
+
     Status search(tenann::PrimitiveSeqView query_vector, int k, int64_t* result_ids, uint8_t* result_distances,
                   tenann::IdFilter* id_filter = nullptr) override;
     Status range_search(tenann::PrimitiveSeqView query_vector, int k, std::vector<int64_t>* result_ids,
