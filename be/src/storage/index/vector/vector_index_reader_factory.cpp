@@ -19,12 +19,29 @@
 #include "storage/index/vector/empty_index_reader.h"
 #include "storage/index/vector/tenann_index_reader.h"
 #include "storage/index/vector/vector_index_reader.h"
+#include "tenann/index/index_cache.h"
 
 namespace starrocks {
 
 static Status create_from_file_impl(const std::string& index_path,
                                     const std::shared_ptr<tenann::IndexMeta>& /*index_meta*/,
                                     std::shared_ptr<VectorIndexReader>* vector_index_reader, FileSystem* fs) {
+    // Fast path: if the SR-owned VectorIndexCache already has this index, the
+    // .vi file has been loaded before — it definitely exists, and is not an
+    // empty-mark placeholder (those go to EmptyIndexReader and never get
+    // cached). Skip the existence/size checks entirely to avoid per-query
+    // OSS/S3 metadata round-trips on the warm path (each of fs->path_exists,
+    // fs->new_random_access_file and get_size is a separate HEAD that the
+    // local datacache does not cover).
+    auto* cache = tenann::GetGlobalIndexCache();
+    if (cache != nullptr) {
+        tenann::IndexCacheHandle probe;
+        if (cache->Lookup(tenann::CacheKey(index_path), &probe)) {
+            (*vector_index_reader) = std::make_shared<TenANNReader>();
+            return Status::OK();
+        }
+    }
+
     std::unique_ptr<RandomAccessFile> index_file;
     if (fs != nullptr) {
         // Remote FS: let new_random_access_file() be the single source of truth for
