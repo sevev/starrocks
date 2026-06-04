@@ -37,6 +37,7 @@
 #include "common/config_scan_io_fwd.h"
 #include "common/config_starlet_fwd.h"
 #include "common/config_storage_fwd.h"
+#include "common/config_vector_index_fwd.h"
 #include "common/status.h"
 #include "fs/fs.h"
 #include "fs/fs_factory.h"
@@ -357,6 +358,11 @@ private:
     StatusOr<SparseRange<>> _get_row_ranges_by_short_key_ranges();
     Status _get_row_ranges_by_zone_map();
     Status _get_row_ranges_by_vector_index();
+    // Fold the residual scalar predicates (those on columns without an exact index, so still present in
+    // the predicate tree at vector-index time) into a row bitmap by reading their columns and evaluating
+    // them. Returns the subset of `candidate` matching all such predicates, enabling a true pre-filter of
+    // the ANN search. Mirrors _apply_inverted_index() but reads + evaluates instead of using an index.
+    StatusOr<roaring::Roaring> _evaluate_residual_to_bitmap(const roaring::Roaring& candidate);
     Status _get_row_ranges_by_bloom_filter();
     Status _get_row_ranges_by_rowid_range();
     Status _get_row_ranges_by_row_ids(std::vector<int64_t>* result_ids, SparseRange<>* r);
@@ -1152,6 +1158,25 @@ Status SegmentIterator::_get_row_ranges_by_vector_index() {
 
     SCOPED_RAW_TIMER(&_opts.stats->get_row_ranges_by_vector_index_timer);
 
+    // Filter-strategy selection for a residual scalar predicate (one not exactly resolved by an index, so
+    // still present in the predicate tree here; the map is empty under the current FE behaviour -> no-op):
+    //   PRE  : early-evaluate the predicate into the candidate bitmap so the ANN visits only matching rows
+    //          (mirrors _apply_inverted_index). Chosen when pre-filtering is enabled and the index supports
+    //          efficient filtered search.
+    //   POST : oversample the ANN (k * factor) and let the read-time predicate path filter the result.
+    //          Fallback for indexes without efficient filtered search, or when pre-filtering is disabled.
+    const bool has_residual = !_opts.pred_tree.get_immediate_column_predicate_map().empty();
+    const bool use_pre_filter = has_residual && config::enable_vector_index_residual_prefilter &&
+                                _vector_index_ctx->ann_reader->supports_efficient_filtered_search();
+    if (use_pre_filter) {
+        ASSIGN_OR_RETURN(roaring::Roaring matched, _evaluate_residual_to_bitmap(range2roaring(_scan_range)));
+        _scan_range = roaring2range(matched);
+        RETURN_IF(_scan_range.empty(), Status::OK());
+    }
+    const int search_k = (has_residual && !use_pre_filter)
+                                 ? _vector_index_ctx->k * config::vector_index_residual_post_filter_oversample
+                                 : _vector_index_ctx->k;
+
     Status st;
     std::map<rowid_t, float> id2distance_map;
     std::vector<int64_t> result_ids;
@@ -1163,13 +1188,13 @@ Status SegmentIterator::_get_row_ranges_by_vector_index() {
         SCOPED_RAW_TIMER(&_opts.stats->vector_search_timer);
         if (_vector_index_ctx->vector_range >= 0) {
             st = _vector_index_ctx->ann_reader->range_search(
-                    _vector_index_ctx->query_view, _vector_index_ctx->k, &result_ids, &result_distances, &del_id_filter,
+                    _vector_index_ctx->query_view, search_k, &result_ids, &result_distances, &del_id_filter,
                     static_cast<float>(_vector_index_ctx->vector_range), _vector_index_ctx->result_order);
         } else {
-            result_ids.resize(_vector_index_ctx->k);
-            result_distances.resize(_vector_index_ctx->k);
+            result_ids.resize(search_k);
+            result_distances.resize(search_k);
             st = _vector_index_ctx->ann_reader->search(
-                    _vector_index_ctx->query_view, _vector_index_ctx->k, (result_ids.data()),
+                    _vector_index_ctx->query_view, search_k, (result_ids.data()),
                     reinterpret_cast<uint8_t*>(result_distances.data()), &del_id_filter);
         }
     }
@@ -1210,6 +1235,75 @@ Status SegmentIterator::_get_row_ranges_by_vector_index() {
     return Status::OK();
 #endif
 }
+
+#ifdef WITH_TENANN
+StatusOr<roaring::Roaring> SegmentIterator::_evaluate_residual_to_bitmap(const roaring::Roaring& candidate) {
+    const auto& residual = _opts.pred_tree.get_immediate_column_predicate_map();
+    if (residual.empty() || candidate.cardinality() == 0) {
+        return candidate;
+    }
+
+    // cid -> field index in _schema (same pattern as _apply_inverted_index()).
+    std::unordered_map<ColumnId, size_t> cid_2_fid;
+    for (size_t i = 0; i < _schema.num_fields(); i++) {
+        cid_2_fid.emplace(_schema.field(i)->id(), i);
+    }
+
+    // ColumnPredicate::evaluate_and uses uint16_t [from, to), so read + evaluate in <= kEvalBatch slices.
+    constexpr uint32_t kEvalBatch = 4096;
+    SparseRange<> rows = roaring2range(candidate);
+    roaring::Roaring result = candidate;
+    std::vector<uint8_t> selection;
+
+    for (const auto& [cid, preds] : residual) {
+        // Only evaluate column predicates that can be applied to a single column read here; leave expr
+        // predicates (and columns without an iterator) to the read-time predicate path.
+        bool evaluable = true;
+        for (const auto* pred : preds) {
+            if (pred->type() == PredicateType::kExpr) {
+                evaluable = false;
+                break;
+            }
+        }
+        auto fid_it = cid_2_fid.find(cid);
+        if (!evaluable || fid_it == cid_2_fid.end() || cid >= _column_iterators.size() ||
+            _column_iterators[cid] == nullptr) {
+            continue;
+        }
+        const FieldPtr& field = _schema.field(fid_it->second);
+
+        roaring::Roaring matched;
+        auto iter = rows.new_iterator();
+        while (iter.has_more()) {
+            Range<> r = iter.next(kEvalBatch);
+            const uint32_t bn = r.end() - r.begin();
+            SparseRange<> sub;
+            sub.add(r);
+
+            MutableColumnPtr col = ChunkFactory::column_from_field(*field);
+            // ScalarColumnIterator::next_batch(SparseRange, Column*) reads from the current page and
+            // does not seek internally, so position the iterator at the slice start first.
+            RETURN_IF_ERROR(_column_iterators[cid]->seek_to_ordinal(r.begin()));
+            RETURN_IF_ERROR(_column_iterators[cid]->next_batch(sub, col.get()));
+
+            selection.assign(bn, 1);
+            for (const auto* pred : preds) {
+                RETURN_IF_ERROR(pred->evaluate_and(col.get(), selection.data(), 0, static_cast<uint16_t>(bn)));
+            }
+            for (uint32_t i = 0; i < bn; i++) {
+                if (selection[i]) {
+                    matched.add(r.begin() + i);
+                }
+            }
+        }
+        result &= matched;
+        if (result.cardinality() == 0) {
+            break;
+        }
+    }
+    return result;
+}
+#endif
 
 Status SegmentIterator::_get_row_ranges_by_row_ids(std::vector<int64_t>* result_ids, SparseRange<>* r) {
     if (result_ids->empty()) {

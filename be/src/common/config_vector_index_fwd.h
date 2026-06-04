@@ -54,6 +54,14 @@ CONF_mDouble(vector_adaptive_ef_cap, "8.0");
 
 CONF_mInt64(vector_adaptive_ef_baseline_rows, "300000");
 
+// Residual scalar predicate (one not exactly resolved by an index) + ANN: when true and the index
+// supports efficient filtered search, pre-filter (early-evaluate the predicate into the ANN candidate);
+// otherwise post-filter (oversample the ANN and let the read-time predicate path filter the result).
+CONF_mBool(enable_vector_index_residual_prefilter, "true");
+
+// Post-filter oversample factor: the ANN searches k * this when post-filtering a residual predicate.
+CONF_mInt32(vector_index_residual_post_filter_oversample, "3");
+
 // Per-builder in-memory row buffer cap before tenann does an intermediate
 // add into the faiss in-memory index. Bounds peak memory during HNSWFlat
 // build by capping data_buffer_ at |rows| × dim × 4 bytes (does NOT cap

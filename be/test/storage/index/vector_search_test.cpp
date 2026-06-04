@@ -38,6 +38,9 @@
 #include "fs/fs_memory.h"
 #include "gen_cpp/tablet_schema.pb.h"
 #include "gutil/casts.h"
+#include "storage/column_predicate.h"
+#include "storage/index/index_descriptor.h"
+#include "storage/predicate_tree/predicate_tree.h"
 #include "gutil/walltime.h"
 #include "runtime/mem_pool.h"
 #include "storage/chunk_helper.h"
@@ -1027,5 +1030,218 @@ TEST(ResolveBruteForceVectorColumnTest, internal_error_when_dict_chunk_is_null) 
     ASSERT_FALSE(st.ok());
     EXPECT_TRUE(st.status().is_internal_error());
 }
+
+#ifdef WITH_TENANN
+// Validates the residual-predicate PRE-filter in SegmentIterator::_get_row_ranges_by_vector_index:
+// with a real HNSW .vi present (use_vector_index=true), a scalar predicate on a column WITHOUT an exact
+// index must be early-evaluated into the ANN candidate, so the returned top-k contains ONLY matching rows.
+// Data: 8 rows, vec_i=[i,0,0,0], filter_col=i, query=[0,0,0,0] (L2 dist = i^2), predicate filter_col>=4.
+//   - WITH pre-filter (this change): k=3 nearest among {4,5,6,7} = rows 4,5,6.
+//   - WITHOUT it (post-filter): ANN picks rows 0,1,2 (filter<4) -> filtered out -> 0 rows (the bug).
+class VectorResidualPrefilterTest : public testing::Test {
+protected:
+    void SetUp() override {
+        CHECK_OK(fs::remove_all(kDir));
+        CHECK_OK(fs::create_directories(kDir));
+        ASSIGN_OR_ABORT(_fs, FileSystemFactory::CreateSharedFromString(kDir));
+    }
+    void TearDown() override { (void)fs::remove_all(kDir); }
+
+    const std::string kDir = "vector_residual_prefilter_test";
+    static constexpr int64_t kIndexId = 100;
+    std::shared_ptr<FileSystem> _fs;
+
+    TabletSchemaPB base_schema_pb() {
+        TabletSchemaPB pb;
+        pb.set_keys_type(DUP_KEYS);
+        pb.set_next_column_unique_id(4);
+        auto* c0 = pb.add_column();
+        c0->set_unique_id(0); c0->set_name("id"); c0->set_type("BIGINT");
+        c0->set_is_key(true); c0->set_is_nullable(false); c0->set_length(8);
+        c0->set_index_length(8); c0->set_aggregation("NONE");
+        auto* c1 = pb.add_column();
+        c1->set_unique_id(1); c1->set_name("vector"); c1->set_type("ARRAY");
+        c1->set_is_key(false); c1->set_is_nullable(false); c1->set_length(24); c1->set_aggregation("NONE");
+        auto* child = c1->add_children_columns();
+        child->set_unique_id(2); child->set_name("element"); child->set_type("FLOAT");
+        child->set_is_key(false); child->set_is_nullable(true); child->set_length(4); child->set_aggregation("NONE");
+        auto* c3 = pb.add_column();
+        c3->set_unique_id(3); c3->set_name("filter_col"); c3->set_type("INT");
+        c3->set_is_key(false); c3->set_is_nullable(false); c3->set_length(4);
+        c3->set_index_length(4); c3->set_aggregation("NONE");
+        return pb;
+    }
+    std::shared_ptr<TabletSchema> write_schema() { return TabletSchema::create(base_schema_pb()); }
+    std::shared_ptr<TabletSchema> read_schema_with_index() {
+        auto pb = base_schema_pb();
+        auto* idx = pb.add_table_indices();
+        idx->set_index_id(kIndexId);
+        idx->set_index_name("vector_index");
+        idx->set_index_type(IndexType::VECTOR);
+        idx->add_col_unique_id(1);
+        idx->set_index_properties(
+                R"({"common_properties":{"index_type":"hnsw","dim":"4","metric_type":"l2_distance","is_vector_normed":"false"},)"
+                R"("index_properties":{"efconstruction":"40","m":"16"},"search_properties":{"efsearch":"40"}})");
+        return TabletSchema::create(pb);
+    }
+    ColumnPtr make_array_column(const std::vector<std::vector<float>>& vecs) {
+        auto elem = FixedLengthColumn<float>::create();
+        auto nulls = NullColumn::create();
+        auto offsets = UInt32Column::create();
+        offsets->append(0);
+        uint32_t off = 0;
+        for (const auto& v : vecs) {
+            for (float f : v) { elem->append(f); nulls->append(0); }
+            off += v.size();
+            offsets->append(off);
+        }
+        auto nullable = NullableColumn::create(std::move(elem), std::move(nulls));
+        return ArrayColumn::create(std::move(nullable), std::move(offsets));
+    }
+
+    // Runs the residual-predicate ANN query and asserts the top-k contains only matching rows.
+    // Both the PRE (early-eval) and POST (oversample + read-time filter) paths must return the same
+    // correct result for this data.
+    void run_residual_case() {
+    const int N = 8;
+    std::vector<int64_t> ids(N);
+    std::vector<std::vector<float>> vecs(N);
+    std::vector<int32_t> filt(N);
+    for (int i = 0; i < N; i++) {
+        ids[i] = i;
+        vecs[i] = {static_cast<float>(i), 0.f, 0.f, 0.f};
+        filt[i] = i;
+    }
+
+    // write segment (id, vector, filter_col)
+    auto wschema = write_schema();
+    std::string seg_file = kDir + "/seg.dat";
+    ASSIGN_OR_ABORT(auto wfile, _fs->new_writable_file(seg_file));
+    SegmentWriterOptions wopts;
+    SegmentWriter writer(std::move(wfile), 0, wschema, wopts);
+    auto chunk = ChunkFactory::new_chunk(ChunkHelper::convert_schema(wschema), N);
+    for (int i = 0; i < N; i++) chunk->columns()[0]->as_mutable_ptr()->append_datum(Datum(ids[i]));
+    for (int i = 0; i < N; i++) {
+        DatumArray a;
+        for (float f : vecs[i]) a.emplace_back(Datum(f));
+        chunk->columns()[1]->as_mutable_ptr()->append_datum(Datum(a));
+    }
+    for (int i = 0; i < N; i++) chunk->columns()[2]->as_mutable_ptr()->append_datum(Datum(filt[i]));
+    ASSERT_OK(writer.init());
+    ASSERT_OK(writer.append_chunk(*chunk));
+    uint64_t seg_sz = 0, idx_sz = 0, footer = 0;
+    ASSERT_OK(writer.finalize(&seg_sz, &idx_sz, &footer));
+    auto rschema = read_schema_with_index();
+    ASSIGN_OR_ABORT(auto segment, Segment::open(_fs, FileInfo{seg_file}, 0, rschema));
+
+    // build the real HNSW .vi at exactly the path _init_ann_reader computes
+    RowsetId rid;
+    rid.init(2);
+    std::string vi_path = IndexDescriptor::vector_index_file_path(kDir, rid.to_string(), 0, kIndexId);
+    {
+        auto tablet_index = std::make_shared<TabletIndex>();
+        TabletIndexPB ipb;
+        ipb.set_index_id(kIndexId);
+        ipb.set_index_name("vector_index");
+        ipb.set_index_type(IndexType::VECTOR);
+        ipb.add_col_unique_id(1);
+        tablet_index->init_from_pb(ipb);
+        tablet_index->add_common_properties("index_type", "hnsw");
+        tablet_index->add_common_properties("dim", "4");
+        tablet_index->add_common_properties("is_vector_normed", "false");
+        tablet_index->add_common_properties("metric_type", "l2_distance");
+        tablet_index->add_common_properties("index_build_threshold", "0");
+        tablet_index->add_index_properties("efconstruction", "40");
+        tablet_index->add_index_properties("m", "16");
+        tablet_index->add_search_properties("efsearch", "40");
+        std::unique_ptr<VectorIndexWriter> viw;
+        VectorIndexWriter::create(tablet_index, vi_path, true, &viw);
+        ASSERT_OK(viw->init());
+        ASSERT_OK(viw->append(*make_array_column(vecs)));
+        uint64_t sz = 0;
+        ASSERT_OK(viw->finish(&sz));
+        ASSERT_GT(sz, 0);
+    }
+    ASSERT_TRUE(fs::path_exist(vi_path));
+
+    // run SegmentIterator: ANN query [0,0,0,0], k=3, residual predicate filter_col >= 4
+    OlapReaderStatistics stats;
+    SegmentReadOptions seg_opts;
+    seg_opts.fs = _fs;
+    seg_opts.stats = &stats;
+    seg_opts.tablet_schema = rschema;
+    seg_opts.rowset_path = kDir;
+    seg_opts.rowsetid = rid;
+
+    auto vs = std::make_shared<VectorSearchOption>();
+    vs->use_vector_index = true;
+    vs->query_vector = {0.f, 0.f, 0.f, 0.f};
+    vs->k = 3;
+    vs->k_factor = 1.0;
+    vs->vector_distance_column_name = "__vector_approx_l2_distance";
+    vs->vector_column_id = rschema->num_columns();
+    vs->vector_slot_id = 100;
+    vs->use_ivfpq = false;
+    vs->vector_range = -1.0;
+    vs->result_order = 0;
+    vs->pq_refine_factor = 1.0;
+    seg_opts.use_vector_index = true;
+    seg_opts.vector_search_option = vs;
+
+    // residual predicate on filter_col (tablet schema column index 2; no bitmap/inverted index)
+    std::unique_ptr<ColumnPredicate> pred(new_column_ge_predicate(get_type_info(TYPE_INT), 2, "4"));
+    PredicateAndNode root;
+    root.add_child(PredicateColumnNode{pred.get()});
+    seg_opts.pred_tree = PredicateTree::create(std::move(root));
+
+    // output id + filter_col so we can assert the predicate held on every returned row
+    Schema read_schema;
+    auto idf = std::make_shared<Field>(0, "id", get_type_info(TYPE_BIGINT), false);
+    idf->set_uid(0);
+    read_schema.append(idf);
+    auto ff = std::make_shared<Field>(2, "filter_col", get_type_info(TYPE_INT), false);
+    ff->set_uid(3);
+    read_schema.append(ff);
+
+    auto it = new_segment_iterator(segment, read_schema, seg_opts);
+    ASSERT_TRUE(it != nullptr);
+    ASSERT_OK(it->init_output_schema({}));
+    auto out = ChunkFactory::new_chunk(it->output_schema(), 16);
+    auto st = it->get_next(out.get());
+    ASSERT_TRUE(st.ok() || st.is_end_of_file()) << "get_next status: " << st.to_string();
+
+    // Correctness for BOTH paths: every returned row satisfies the residual predicate (filter_col>=4),
+    // and the true 3 nearest matching rows (ids 4,5,6) are present. PRE returns exactly k=3; POST returns
+    // all matching within the oversample (no upstream TopN in this UT) -> >=3. Without the filter the ANN
+    // would pick rows 0,1,2 (filter_col<4) and post-filter to 0 rows -- so >=3 also guards that bug.
+    ASSERT_GE(out->num_rows(), 3);
+    const auto* idcol = down_cast<const Int64Column*>(out->get_column_by_index(0).get());
+    const auto* fcol = down_cast<const Int32Column*>(out->get_column_by_index(1).get());
+    bool has4 = false, has5 = false, has6 = false;
+    for (size_t i = 0; i < out->num_rows(); i++) {
+        EXPECT_GE(fcol->get_data()[i], 4) << "returned row violates residual predicate filter_col>=4";
+        const int64_t id = idcol->get_data()[i];
+        has4 |= (id == 4);
+        has5 |= (id == 5);
+        has6 |= (id == 6);
+    }
+    EXPECT_TRUE(has4 && has5 && has6) << "missing the nearest matching rows (4,5,6)";
+    it->close();
+    }
+};
+
+TEST_F(VectorResidualPrefilterTest, residual_predicate_prefilters_ann) {
+    // default config -> PRE path (TenANN supports efficient filtered search).
+    run_residual_case();
+}
+
+TEST_F(VectorResidualPrefilterTest, residual_predicate_post_filter) {
+    // force POST path: oversample + read-time residual filter must yield the same correct top-k.
+    bool saved = config::enable_vector_index_residual_prefilter;
+    config::enable_vector_index_residual_prefilter = false;
+    DeferOp restore([&] { config::enable_vector_index_residual_prefilter = saved; });
+    run_residual_case();
+}
+#endif // WITH_TENANN
 
 } // namespace starrocks
