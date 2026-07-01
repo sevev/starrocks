@@ -638,6 +638,23 @@ struct TVectorSearchOptions {
   // FE predicate-shape flag, so no thrift field is needed. Do not reuse ordinal 13.
 }
 
+// BM25 relevance scoring over a builtin GIN (DOCS_AND_FREQS) index. Set by FE's
+// RewriteToBM25PlanRule, mirrors TVectorSearchOptions. The synthetic score column is
+// injected only into the scan's colRef maps (never table schema), like the ANN distance column.
+struct TBM25SearchOptions {
+  1: optional bool enable;
+  2: optional string query;               // the MATCH_ANY / MATCH_ALL query string
+  3: optional i32 index_column_id;
+  4: optional string score_column_name;   // synthetic score column, e.g. "__bm25_score"
+  5: optional i32 score_slot_id;
+  6: optional double k1;
+  7: optional double b;
+  // 8: reserved for limit_k (WAND top-k pushdown, added in the WAND PR). Do not reuse.
+  // 9: reserved for table-level global BM25Stats broadcast (FE gathers per-tablet partials, sums to
+  //    global N/df/sum_len, sends the reduced stats down). See
+  //    docs/design/builtin-gin-bm25-stats-collection-ab.md section 8. Do not reuse.
+}
+
 enum SampleMethod {
   BY_BLOCK,
   BY_PAGE,
@@ -684,6 +701,7 @@ struct TOlapScanNode {
 
   40: optional TVectorSearchOptions vector_search_options
   41: optional TTableSampleOptions sample_options;
+  42: optional TBM25SearchOptions bm25_search_options
 
   //back pressure
   50: optional bool enable_topn_filter_back_pressure
@@ -750,6 +768,8 @@ struct TLakeScanNode {
   56: optional bool enable_global_late_materialization
 
   57: optional TVectorSearchOptions vector_search_options
+
+  58: optional TBM25SearchOptions bm25_search_options
 
   60: optional list<Exprs.TExpr> partition_conjuncts
 }

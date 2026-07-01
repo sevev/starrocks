@@ -387,6 +387,7 @@ Status TabletReader::get_segment_iterators(const TabletReaderParams& params, std
     rs_opts.column_access_paths = params.column_access_paths;
     rs_opts.use_vector_index = params.use_vector_index;
     rs_opts.vector_search_option = params.vector_search_option;
+    rs_opts.bm25_search_option = params.bm25_search_option;
     rs_opts.has_preaggregation = true;
     if ((is_compaction(params.reader_type) || params.sorted_by_keys_per_tablet)) {
         rs_opts.has_preaggregation = true;
@@ -396,6 +397,19 @@ Status TabletReader::get_segment_iterators(const TabletReaderParams& params, std
     }
 
     SCOPED_RAW_TIMER(&_stats.create_segment_iter_ns);
+
+    // Phase-1 tablet-local BM25 statistics, shared-data path (PR-D). Same as the olap path: this
+    // funnel is the CONSUME point, NOT the compute point -- it runs PER MORSEL and _rowsets is
+    // _morsel->rowsets() (a delta subset under the multi-version query cache), so here we only
+    // propagate the rs_opts.bm25_stats set upstream.
+    //
+    // Decision = scheme A (see docs/design/builtin-gin-bm25-stats-collection-ab.md): compute once
+    // where the FULL version rowset set is available -- LakeDataSourceProvider, keyed by tablet_id,
+    // via Rowset::get_rowsets(tablet_mgr, metadata) -- and inject the shared BM25Stats into params.
+    // Segment-parallel scoring is a HARD requirement, so "one morsel = whole tablet" is NOT the
+    // approach. Stats are cheap scalars only (NormsPB.sum_len, doc_freq_column, segment row count);
+    // the carrier field + the rs_opts -> seg_options copy are already wired and Phase-2 reads
+    // _opts.bm25_stats. See reference-impl section E (interface I4).
 
     std::vector<std::future<StatusOr<std::vector<ChunkIteratorPtr>>>> futures;
     // The parallel tasks capture local variables and |this| by reference.

@@ -45,9 +45,12 @@ class Status;
 struct OlapReaderStatistics;
 struct ShortKeyRangeOption;
 struct VectorSearchOption;
+struct BM25SearchOption;
+struct BM25Stats;
 
 using ShortKeyRangeOptionPtr = std::shared_ptr<ShortKeyRangeOption>;
 using VectorSearchOptionPtr = std::shared_ptr<VectorSearchOption>;
+using BM25SearchOptionPtr = std::shared_ptr<BM25SearchOption>;
 
 class SegmentReadOptions {
 public:
@@ -123,6 +126,12 @@ public:
     bool belonged_to_cloud_native = false;
 
     VectorSearchOptionPtr vector_search_option = nullptr;
+
+    // BM25 (builtin GIN DOCS_AND_FREQS) scoring. bm25_search_option carries the FE request;
+    // bm25_stats is computed once per tablet in Phase-1 and shared down to each segment for
+    // Phase-2 scoring. Both null on the default (DOCS / non-BM25) path.
+    BM25SearchOptionPtr bm25_search_option = nullptr;
+    std::shared_ptr<BM25Stats> bm25_stats = nullptr;
 
     // Data sampling by block-level, which is a core-component of TABLE-SAMPLE feature
     // 1. Regular block smapling: Bernoulli sampling on page-id

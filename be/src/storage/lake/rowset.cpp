@@ -267,6 +267,8 @@ StatusOr<std::vector<ChunkIteratorPtr>> Rowset::read(const Schema& schema, const
     seg_options.column_access_paths = options.column_access_paths;
     seg_options.use_vector_index = options.use_vector_index;
     seg_options.vector_search_option = options.vector_search_option;
+    seg_options.bm25_search_option = options.bm25_search_option;
+    seg_options.bm25_stats = options.bm25_stats;
     seg_options.belonged_to_cloud_native = true;
     seg_options.has_preaggregation = options.has_preaggregation;
     seg_options.enable_predicate_col_late_materialize = options.enable_predicate_col_late_materialize;

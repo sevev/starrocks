@@ -62,6 +62,7 @@
 #include "storage/metadata_util.h"
 #include "storage/predicate_parser.h"
 #include "storage/primitive/projection_iterator.h"
+#include "storage/primitive/bm25_search_option.h"
 #include "storage/primitive/vector_search_option.h"
 #include "storage/storage_engine.h"
 #include "storage/virtual_column_utils.h"
@@ -109,6 +110,19 @@ Status OlapChunkSource::prepare(RuntimeState* state) {
         _vector_distance_column_name = vector_search_options.vector_distance_column_name;
         _vector_slot_id = vector_search_options.vector_slot_id;
         _params.vector_search_option = std::make_shared<VectorSearchOption>();
+    }
+    // BM25 (builtin GIN DOCS_AND_FREQS). Gated: only built when FE set enable. index_column_id is
+    // carried directly in the thrift (no slot resolution needed, unlike the ANN column).
+    if (thrift_olap_scan_node.__isset.bm25_search_options && thrift_olap_scan_node.bm25_search_options.enable) {
+        const auto& bm25 = thrift_olap_scan_node.bm25_search_options;
+        _params.bm25_search_option = std::make_shared<BM25SearchOption>();
+        _params.bm25_search_option->enable = true;
+        _params.bm25_search_option->query = bm25.query;
+        _params.bm25_search_option->index_column_id = bm25.index_column_id;
+        _params.bm25_search_option->score_column_name = bm25.score_column_name;
+        _params.bm25_search_option->score_slot_id = bm25.score_slot_id;
+        _params.bm25_search_option->k1 = bm25.k1;
+        _params.bm25_search_option->b = bm25.b;
     }
     const TupleDescriptor* tuple_desc = state->desc_tbl().get_tuple_descriptor(thrift_olap_scan_node.tuple_id);
     _slots = &tuple_desc->slots();

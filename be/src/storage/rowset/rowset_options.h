@@ -44,6 +44,9 @@ struct RowidRangeOption;
 struct ShortKeyRangesOption;
 struct VectorSearchOption;
 using VectorSearchOptionPtr = std::shared_ptr<VectorSearchOption>;
+struct BM25SearchOption;
+struct BM25Stats;
+using BM25SearchOptionPtr = std::shared_ptr<BM25SearchOption>;
 
 class RowsetReadOptions {
     using RowidRangeOptionPtr = std::shared_ptr<RowidRangeOption>;
@@ -98,6 +101,11 @@ public:
     bool use_vector_index = false;
 
     VectorSearchOptionPtr vector_search_option = nullptr;
+
+    // BM25 (builtin GIN DOCS_AND_FREQS): FE request + tablet-local Phase-1 stats. Both null on
+    // the default path. See storage/primitive/bm25_search_option.h.
+    BM25SearchOptionPtr bm25_search_option = nullptr;
+    std::shared_ptr<BM25Stats> bm25_stats = nullptr;
 
     TTableSampleOptions sample_options;
     bool enable_join_runtime_filter_pushdown = false;

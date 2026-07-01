@@ -299,6 +299,7 @@ Status TabletReader::_init_collector_for_pk_index_read() {
     rs_opts.is_primary_keys = false;
     rs_opts.use_vector_index = _reader_params->use_vector_index;
     rs_opts.vector_search_option = _reader_params->vector_search_option;
+    rs_opts.bm25_search_option = _reader_params->bm25_search_option;
     rs_opts.enable_join_runtime_filter_pushdown = _reader_params->enable_join_runtime_filter_pushdown;
 
     rs_opts.rowid_range_option = std::make_shared<RowidRangeOption>();
@@ -375,6 +376,7 @@ Status TabletReader::get_segment_iterators(const TabletReaderParams& params, std
     rs_opts.column_access_paths = params.column_access_paths;
     rs_opts.use_vector_index = params.use_vector_index;
     rs_opts.vector_search_option = params.vector_search_option;
+    rs_opts.bm25_search_option = params.bm25_search_option;
     rs_opts.sample_options = params.sample_options;
     rs_opts.enable_join_runtime_filter_pushdown = params.enable_join_runtime_filter_pushdown;
     rs_opts.enable_predicate_col_late_materialize = params.enable_predicate_col_late_materialize;
@@ -400,6 +402,20 @@ Status TabletReader::get_segment_iterators(const TabletReaderParams& params, std
     }
 
     SCOPED_RAW_TIMER(&_stats.create_segment_iter_ns);
+    // Phase-1 tablet-local BM25 statistics (PR-D). Tablet-local IDF/avgdl aggregate over the WHOLE
+    // tablet and are computed ONCE per (tablet, version, query). This funnel is the CONSUME point,
+    // NOT the compute point: it runs PER MORSEL and _rowsets here is _morsel->rowsets() (a range
+    // split and/or the multi-version query-cache delta subset), so here we only propagate the
+    // rs_opts.bm25_stats that was set upstream.
+    //
+    // Decision = scheme A (see docs/design/builtin-gin-bm25-stats-collection-ab.md): compute once at
+    // the level that owns the FULL version rowset set (MorselQueue / scan setup, via
+    // capture_consistent_rowsets(version)) and inject the shared BM25Stats into each morsel's
+    // TabletReaderParams. Segment-parallel scoring is a HARD requirement, so "one morsel = whole
+    // tablet / disable tablet-internal-parallel" is NOT the approach. Stats are cheap scalars only
+    // (NormsPB.sum_len, doc_freq_column, segment row count); the carrier field + the rs_opts ->
+    // seg_options copy are already wired and Phase-2 reads _opts.bm25_stats. See reference-impl
+    // section E (interface I4).
     for (auto& rowset : _rowsets) {
         if (params.rowid_range_option != nullptr && !params.rowid_range_option->contains_rowset(rowset.get())) {
             continue;
