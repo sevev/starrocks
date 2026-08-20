@@ -15,6 +15,7 @@
 #include "exec/pipeline/scan/olap_scan_operator.h"
 
 #include "compute_env/global_dict/fragment_dict_state.h"
+#include "compute_env/query/fragment_runtime_state.h"
 #include "exec/exec_env.h"
 #include "exec/olap_scan_node.h"
 #include "exec/pipeline/query_context.h"
@@ -25,10 +26,38 @@
 #include "runtime/descriptors.h"
 #include "runtime/runtime_state.h"
 #include "storage/query/olap_fixed_morsel_queue.h"
+#include "storage/tablet_scan_key_pruner.h"
+#include "storage/tablet_schema.h"
+
+#include <set>
 
 namespace starrocks::pipeline {
 
 namespace {
+
+// A minimal DUP_KEYS schema with one INT key, enough for the pruner to type a scan key and for
+// OlapPredicateParser to be constructed.
+TabletSchemaCSPtr make_int_key_schema() {
+    TabletSchemaPB schema_pb;
+    schema_pb.set_keys_type(DUP_KEYS);
+    schema_pb.set_num_short_key_columns(1);
+    schema_pb.set_num_rows_per_row_block(1024);
+    auto* key = schema_pb.add_column();
+    key->set_unique_id(1);
+    key->set_name("k1");
+    key->set_type("INT");
+    key->set_is_key(true);
+    key->set_is_nullable(false);
+    key->set_aggregation("NONE");
+    auto* value = schema_pb.add_column();
+    value->set_unique_id(2);
+    value->set_name("v1");
+    value->set_type("INT");
+    value->set_is_key(false);
+    value->set_is_nullable(true);
+    value->set_aggregation("NONE");
+    return TabletSchema::create(schema_pb);
+}
 
 void expect_vector_index_counter(RuntimeProfile* profile, const char* name, const char* parent) {
     auto it = profile->_counter_map.find(name);
@@ -61,7 +90,38 @@ public:
     void SetUp() override;
 
 protected:
+    // Builds a prepared OlapChunkSource over an empty scan range. Keeps ownership so the caller can
+    // use the raw pointer for the length of the test.
+    OlapChunkSource* make_chunk_source(OlapScanNode* scan_node, ChunkBufferLimiterPtr limiter) {
+        auto scan_ctx_factory =
+                std::make_shared<OlapScanContextFactory>(scan_node, 1, false, false, std::move(limiter));
+        auto* factory = _object_pool.add(new OlapScanOperatorFactory(1, scan_node, scan_ctx_factory));
+        auto scan_operator = std::make_shared<OlapScanOperator>(factory, 1, 0, 1, scan_node,
+                                                                scan_ctx_factory->get_or_create(0));
+        _scan_operators.push_back(scan_operator);
+        TScanRange scan_range;
+        auto chunk_source = scan_operator->create_chunk_source(std::make_unique<ScanMorsel>(1, scan_range), 0);
+        auto* olap_chunk_source = down_cast<OlapChunkSource*>(chunk_source.get());
+        CHECK(olap_chunk_source->ChunkSource::prepare(&_runtime_state).ok());
+        // OlapChunkSource::prepare would set this, but it also opens the tablet reader, which needs a
+        // real tablet. The reader params only read query options off it.
+        olap_chunk_source->_runtime_state = &_runtime_state;
+        olap_chunk_source->_init_counter(&_runtime_state);
+        // _init_reader_params reaches into the context's conjuncts manager, which stays null until
+        // parse_conjuncts runs. There are no conjuncts here; this just builds the manager.
+        CHECK(olap_chunk_source->_scan_ctx->parse_conjuncts(&_runtime_state, {}, &_runtime_filters, 0).ok());
+        // _slots is normally filled by the full prepare() path, which needs a real tablet. The
+        // reader params only walk it to map conjunct slots onto schema fields.
+        olap_chunk_source->_slots = &_tbl->get_tuple_descriptor(1)->slots();
+        _chunk_sources.push_back(std::move(chunk_source));
+        return olap_chunk_source;
+    }
+
     ObjectPool _object_pool;
+    std::vector<std::shared_ptr<OlapScanOperator>> _scan_operators;
+    std::vector<ChunkSourcePtr> _chunk_sources;
+    RuntimeFilterProbeCollector _runtime_filters;
+    FragmentRuntimeState _fragment_runtime_state;
     RuntimeState _runtime_state;
     TDescriptorTable _thrift_tbl;
     const int64_t _chunk_size = 4096;
@@ -95,6 +155,9 @@ void OlapScanOperatorTest::SetUp() {
 
     _query_ctx.init_mem_tracker(-1, RuntimeEnv::GetInstance()->process_mem_tracker());
     _runtime_state.set_query_ctx(&_query_ctx, &_query_ctx.query_runtime_state(), _query_ctx.object_pool());
+    // parse_conjuncts reads pred_tree_params off the fragment runtime state; without one it is a
+    // null dereference.
+    _runtime_state.set_fragment_runtime_state(&_fragment_runtime_state);
 }
 
 TEST_F(OlapScanOperatorTest, test_finish_sequence) {
@@ -177,6 +240,72 @@ TEST_F(OlapScanOperatorTest, pipeline_chunk_source_registers_vector_index_counte
 
     expect_vector_index_counters(olap_chunk_source->_runtime_profile);
     scan_node.close(&_runtime_state);
+}
+
+// The pruned range set must be what reaches TabletReaderParams: the two _init_reader_params
+// overloads exist so the pruned path can pass borrowed pointers while the untouched path keeps
+// passing the owning vector, and nothing else in the BE suite drives either of them.
+TEST_F(OlapScanOperatorTest, reader_params_take_the_pruned_range_set) {
+    _tnode.olap_scan_node.tuple_id = 1;
+    _tnode.olap_scan_node.is_preaggregation = false;
+    _tnode.__isset.olap_scan_node = true;
+    auto schema = make_int_key_schema();
+
+    std::vector<std::unique_ptr<OlapScanRange>> owned;
+    for (int32_t value = 0; value < 16; ++value) {
+        auto range = std::make_unique<OlapScanRange>();
+        range->begin_include = true;
+        range->end_include = true;
+        range->begin_scan_range = OlapTuple({std::to_string(value)});
+        range->end_scan_range = OlapTuple({std::to_string(value)});
+        owned.emplace_back(std::move(range));
+    }
+    std::vector<OlapScanRange*> all;
+    for (const auto& range : owned) {
+        all.push_back(range.get());
+    }
+
+    // Untouched path: the owning vector overload hands every range to the reader params.
+    {
+        OlapScanNode scan_node(&_object_pool, _tnode, *_tbl);
+        auto* source = make_chunk_source(&scan_node, std::make_unique<UnlimitedChunkBufferLimiter>());
+        source->_tablet_schema = schema;
+        ASSERT_TRUE(source->_init_reader_params(owned).ok());
+        EXPECT_EQ(owned.size(), source->_params.start_key.size());
+        EXPECT_EQ(owned.size(), source->_params.end_key.size());
+        scan_node.close(&_runtime_state);
+    }
+
+    // Pruned path: whatever the pruner keeps for a bucket is exactly what the reader is told to
+    // seek. Asserting the two buckets partition the input is the property that matters -- a range
+    // dropped by both buckets would be rows silently missing from the query.
+    constexpr int32_t kBucketNum = 2;
+    size_t kept_total = 0;
+    std::set<std::string> kept_keys;
+    for (int32_t bucket_id = 0; bucket_id < kBucketNum; ++bucket_id) {
+        TabletHashBucketConstraint constraint;
+        constraint.distribution_key_positions = {0};
+        constraint.bucket_id = bucket_id;
+        constraint.bucket_num = kBucketNum;
+        constraint.pruning_was_exact = false;
+        auto pruned = TabletScanKeyPruner::prune_hash(constraint, *schema, all);
+        ASSERT_FALSE(pruned.fallback);
+
+        OlapScanNode scan_node(&_object_pool, _tnode, *_tbl);
+        auto* source = make_chunk_source(&scan_node, std::make_unique<UnlimitedChunkBufferLimiter>());
+        source->_tablet_schema = schema;
+        ASSERT_TRUE(source->_init_reader_params(pruned.ranges).ok());
+        EXPECT_EQ(pruned.ranges.size(), source->_params.start_key.size());
+
+        kept_total += pruned.ranges.size();
+        for (const auto* range : pruned.ranges) {
+            // No range may be kept by more than one bucket.
+            EXPECT_TRUE(kept_keys.insert(range->begin_scan_range.get_value(0)).second);
+        }
+        scan_node.close(&_runtime_state);
+    }
+    EXPECT_EQ(owned.size(), kept_total);
+    EXPECT_EQ(owned.size(), kept_keys.size());
 }
 
 } // namespace starrocks::pipeline
