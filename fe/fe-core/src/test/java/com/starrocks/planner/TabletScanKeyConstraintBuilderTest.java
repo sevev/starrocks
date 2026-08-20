@@ -20,6 +20,7 @@ import com.starrocks.catalog.LocalTablet;
 import com.starrocks.catalog.MaterializedIndex;
 import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.RandomDistributionInfo;
+import com.starrocks.catalog.RangeDistributionInfo;
 import com.starrocks.catalog.Table;
 import com.starrocks.sql.ast.KeysType;
 import com.starrocks.thrift.TStorageType;
@@ -170,5 +171,61 @@ public class TabletScanKeyConstraintBuilderTest {
                 olapTable.getDefaultDistributionInfo()));
         assertNull(TabletScanKeyConstraintBuilder.create(olapTable, 99999L,
                 olapTable.getDefaultDistributionInfo()));
+    }
+
+    // RANGE sends the type and nothing else. Any topology field that leaked into the payload would
+    // be a second source of truth next to the versioned tablet metadata the BE reads.
+    @Test
+    public void rangeDistributionSendsTypeAndNoTopology() {
+        Column k1 = intKey("k1");
+        OlapTable olapTable = table(Collections.singletonList(k1), Collections.singletonList(k1), 8);
+        TabletScanKeyConstraintBuilder builder = TabletScanKeyConstraintBuilder.create(
+                olapTable, INDEX_META_ID, new RangeDistributionInfo());
+        assertNotNull(builder);
+
+        MaterializedIndex index = indexWithTablets(2001L, 2002L, 2003L);
+        TTabletScanKeyConstraint constraint = builder.build(index, 2002L, 2);
+        assertNotNull(constraint);
+        assertEquals(TTabletScanKeyConstraintType.RANGE, constraint.getType());
+        assertFalse(constraint.isSetDistribution_key_positions());
+        assertFalse(constraint.isSetBucket_id());
+        assertFalse(constraint.isSetBucket_num());
+        assertFalse(constraint.isSetPruning_was_exact());
+    }
+
+    // A RANGE constraint describes no tablet, so it must not depend on the tablet's identity or on
+    // the index it was asked about: the bounds come from the metadata version the BE opened.
+    @Test
+    public void rangeConstraintIsIndependentOfTabletIdentity() {
+        Column k1 = intKey("k1");
+        OlapTable olapTable = table(Collections.singletonList(k1), Collections.singletonList(k1), 8);
+        TabletScanKeyConstraintBuilder builder = TabletScanKeyConstraintBuilder.create(
+                olapTable, INDEX_META_ID, new RangeDistributionInfo());
+        assertNotNull(builder);
+
+        MaterializedIndex index = indexWithTablets(3001L, 3002L);
+        // Unknown tablet: HASH bails out here (see unknownTabletYieldsNoConstraint), RANGE must not.
+        TTabletScanKeyConstraint unknownTablet = builder.build(index, 99999L, 2);
+        assertNotNull(unknownTablet);
+        assertEquals(TTabletScanKeyConstraintType.RANGE, unknownTablet.getType());
+        // Empty index, and a selected-count that claims the whole scan: still just the type.
+        TTabletScanKeyConstraint emptyIndex = builder.build(indexWithTablets(), 3001L, 0);
+        assertNotNull(emptyIndex);
+        assertEquals(TTabletScanKeyConstraintType.RANGE, emptyIndex.getType());
+    }
+
+    // RANGE needs no sort-key mapping at all, so the two reasons HASH gives up -- a distribution
+    // column outside the sort key, and an unresolvable index meta -- must not disable it.
+    @Test
+    public void rangeDistributionIgnoresSortKeyEligibility() {
+        Column k1 = intKey("k1");
+        Column v1 = new Column("v1", IntegerType.INT);
+        OlapTable offSortKey = table(Arrays.asList(k1, v1), Collections.singletonList(v1), 8);
+        assertNull(TabletScanKeyConstraintBuilder.create(offSortKey, INDEX_META_ID,
+                offSortKey.getDefaultDistributionInfo()));
+        assertNotNull(TabletScanKeyConstraintBuilder.create(offSortKey, INDEX_META_ID,
+                new RangeDistributionInfo()));
+        assertNotNull(TabletScanKeyConstraintBuilder.create(offSortKey, -1L, new RangeDistributionInfo()));
+        assertNotNull(TabletScanKeyConstraintBuilder.create(offSortKey, 99999L, new RangeDistributionInfo()));
     }
 }
